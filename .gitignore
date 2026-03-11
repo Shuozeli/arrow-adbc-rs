@@ -1,0 +1,11 @@
+# Exclude the vendored apache/arrow-adbc checkout
+arrow-adbc/
+
+# Rust build output
+target/
+
+# Editor / OS artifacts
+.DS_Store
+.idea/
+.vscode/
+*.swp

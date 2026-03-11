@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: Check & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --exclude adbc-duckdb --all-targets
+      - run: cargo clippy --workspace --exclude adbc-duckdb --all-targets
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  test-offline:
+    name: Tests (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+  test-postgres:
+    name: Tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: adbc_test
+          POSTGRES_PASSWORD: adbc_test
+          POSTGRES_DB: adbc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U adbc_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p adbc-postgres -- --include-ignored
+        env:
+          ADBC_POSTGRES_URI: "host=localhost port=5432 user=adbc_test password=adbc_test dbname=adbc_test"
+
+  test-mysql:
+    name: Tests (MySQL)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: adbc_test
+          MYSQL_USER: adbc_test
+          MYSQL_PASSWORD: adbc_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p adbc-mysql -- --include-ignored
+        env:
+          ADBC_MYSQL_URI: "mysql://adbc_test:adbc_test@localhost:3306/adbc_test"
+
+  # NOTE: FlightSQL integration tests are not run in CI because they require
+  # a live FlightSQL server. They are covered by `cargo test --workspace`
+  # (compile-only, ignored tests are skipped). Run manually with:
+  #   FLIGHTSQL_URI=grpc://localhost:32010 cargo test -p adbc-flightsql -- --ignored
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --exclude adbc-duckdb --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"

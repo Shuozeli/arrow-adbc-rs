@@ -1,0 +1,38 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        entry: cargo check --workspace --all-targets
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test (offline)
+        entry: cargo test --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: no-credentials
+        name: check for leaked credentials
+        entry: '(?i)(yuacx|docker\.yuacx|cyuan@|arrow-adbc-rs-private)'
+        language: pygrep
+        types_or: [rust, toml, markdown]
+        exclude: '\.pre-commit-config\.yaml$'
