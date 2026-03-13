@@ -136,6 +136,7 @@ arrow-adbc-rs/
 │       ├── lib.rs          # Re-exports everything public
 │       ├── driver.rs       # Driver / Database / Connection / Statement traits + option enums
 │       ├── error.rs        # Error, Status, Result<T>
+│       ├── helpers.rs      # Shared utilities (OneBatch, VecReader, require_string)
 │       ├── schema.rs       # Static Arrow schemas for all metadata result sets
 │       └── sql.rs          # Compile-time SQL safety (TrustedSql, QuotedIdent, etc.)
 │
@@ -165,7 +166,9 @@ arrow-adbc-rs/
 └── docs/                   # Documentation
     ├── overview.md
     ├── architecture.md
-    └── development.md      # <- you are here
+    ├── development.md      # <- you are here
+    ├── feature-matrix.md
+    └── publish-checklist.md
 ```
 
 ## Adding a New Driver

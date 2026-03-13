@@ -1,5 +1,5 @@
 [workspace]
-members = ["adbc", "adbc-flightsql", "adbc-sqlite", "adbc-postgres", "adbc-mysql"]
+members = ["crates/adbc", "crates/adbc-flightsql", "crates/adbc-sqlite", "crates/adbc-postgres", "crates/adbc-mysql"]
 resolver = "2"
 
 [workspace.package]
@@ -10,24 +10,28 @@ homepage = "https://github.com/Shuozeli/arrow-adbc-rs"
 keywords = ["adbc", "arrow", "database", "sql", "analytics"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Shuozeli/arrow-adbc-rs"
-rust-version = "1.81"
-version = "0.1.0"
+rust-version = "1.85"
+version = "0.2.0"
 
 [workspace.dependencies]
-adbc = { path = "./adbc", version = "0.1.0" }
-adbc-flightsql = { path = "./adbc-flightsql", version = "0.1.0" }
-adbc-sqlite = { path = "./adbc-sqlite", version = "0.1.0" }
-adbc-postgres = { path = "./adbc-postgres", version = "0.1.0" }
-adbc-mysql = { path = "./adbc-mysql", version = "0.1.0" }
+adbc = { path = "./crates/adbc", version = "0.2.0" }
+adbc-flightsql = { path = "./crates/adbc-flightsql", version = "0.2.0" }
+adbc-sqlite = { path = "./crates/adbc-sqlite", version = "0.2.0" }
+adbc-postgres = { path = "./crates/adbc-postgres", version = "0.2.0" }
+adbc-mysql = { path = "./crates/adbc-mysql", version = "0.2.0" }
 arrow-array = { version = ">=53, <59", default-features = false }
 arrow-buffer = { version = "58", default-features = false }
 arrow-flight = { version = ">=53, <59", features = ["flight-sql", "tls"] }
 arrow-schema = { version = ">=53, <59", default-features = false }
 arrow-select = { version = ">=53, <59", default-features = false }
 bytes = { version = "1" }
-mysql = { version = "25" }
-postgres = { version = "0.19" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+futures-util = { version = "0.3" }
+mysql_async = { version = "0.36" }
+rusqlite = { version = "0.35", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = { version = "0.8" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio-postgres = { version = "0.7" }
+tokio-postgres-rustls = { version = "0.13" }
 tokio-stream = { version = "0.1" }
 tonic = { version = "0.12" }

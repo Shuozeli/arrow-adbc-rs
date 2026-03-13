@@ -86,6 +86,16 @@ set defined by the spec:
 bool / int64 / int32_bitmask / string_list / int32→int32_list map), exactly as the spec
 requires.
 
+### `helpers.rs`
+
+Shared utility types used across all driver crates:
+
+| Type             | Purpose                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| `OneBatch`       | A `RecordBatchReader` that yields exactly one batch          |
+| `VecReader`      | A `RecordBatchReader` backed by a `Vec<RecordBatch>`         |
+| `require_string` | Extracts a `String` from `OptionValue` or returns an error   |
+
 ## `adbc::sql` -- Compile-Time SQL Safety
 
 The `sql` module provides a system for constructing SQL strings that are safe from
@@ -102,7 +112,9 @@ injection by design. The key types are:
 
 All types implement the sealed `SqlSafe` trait, which prevents arbitrary `String`
 or `&str` from being interpolated into SQL. The `trusted_sql!` macro enforces this
-at compile time:
+at compile time. Additionally, `TrustedSql::from_raw` is sealed behind a
+`__private::Seal` token so that only the `trusted_sql!` macro can construct instances
+-- downstream crates cannot bypass the safety system.
 
 ```rust
 // Compiles:
@@ -121,6 +133,9 @@ let sql = trusted_sql!("SELECT * FROM {}", table); // compile error
 This is necessary because `Connection` metadata methods (`get_info`, `get_objects`, …)
 take `&self`, but locking a `Mutex` requires a shared reference. `SqliteStatement` clones
 the `Arc` so statements and connections can coexist without lifetime issues.
+
+All connection types implement `Drop` to issue `ROLLBACK` if an open transaction
+exists when the connection is dropped, preventing leaked transactions.
 
 ### Transaction management
 
@@ -168,6 +183,9 @@ Arrow `RecordBatch`es matching the schemas from `adbc::schema`.
 ### Connection ownership model
 
 Same `Arc<Mutex<…>>` pattern as SQLite. `PostgresConnection` wraps `postgres::Client`.
+Username and password values are escaped for safe embedding in libpq connection strings
+(single-quote and backslash escaping). TLS is available behind the `tls` Cargo feature
+(uses `postgres-native-tls`).
 
 ### Transaction management
 
@@ -182,8 +200,11 @@ Supports all standard isolation levels (Read Uncommitted through Serializable) v
 ### `convert.rs`
 
 Maps PostgreSQL types to Arrow types using `postgres::Column` metadata. Supports
-signed/unsigned integers, floats, booleans, text, and binary. Bulk ingest uses
-parameterized `INSERT` statements with `$1, $2, …` placeholders via `SqlPlaceholders::dollar()`.
+signed/unsigned integers, floats, booleans, text, and binary. `NUMERIC` columns are
+mapped to `Utf8` to avoid precision loss. Bulk ingest uses PostgreSQL's
+`COPY … FROM STDIN (FORMAT text)` protocol for high-throughput writes, with proper
+escaping of special characters (tab, newline, backslash). All ingest operations are
+wrapped in an explicit `BEGIN`/`COMMIT` transaction with `ROLLBACK` on error.
 
 ## `adbc-mysql` Driver
 
@@ -207,12 +228,17 @@ Maps MySQL column types (including unsigned flag detection) to Arrow types. Uses
 `try_from()` checked integer casts to prevent overflow. Bulk ingest uses anonymous
 `?` placeholders.
 
-**Note:** `Statement::prepare` is currently a no-op -- see `docs/feature-matrix.md`
-for known gaps.
+**Note:** `Statement::prepare` validates state transitions but does not perform
+server-side preparation -- see `docs/feature-matrix.md` for known gaps.
 
 ## `adbc-flightsql` Driver
 
 ### Async → sync bridge
+
+TLS is available behind the `tls` Cargo feature. URIs with `grpc+tls://` are
+normalised to `https://` and use `tonic`'s native-roots TLS configuration.
+
+### Async -> sync bridge
 
 ADBC traits are synchronous. The FlightSQL driver bridges internally:
 

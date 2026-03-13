@@ -14,7 +14,7 @@ Update this file when a new feature is implemented or a gap is resolved.
 | `Database::new_connection`             |          Y          |    Y    |    Y    |        Y         |
 | `Connection::AutoCommit`               |          Y          |    Y    |    Y    |        Y         |
 | `Connection::IsolationLevel`           | Serializable only    | Y full  | Y full  |    N not impl    |
-| `Connection::ReadOnly`                 |          N          |    N    |    Y    |        N         |
+| `Connection::ReadOnly`                 |          N          |    Y    |    Y    |        N         |
 | `Connection::commit / rollback`        |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_table_types`          |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_info`                 |          Y          |    Y    |    Y    |        Y         |
