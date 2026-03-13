@@ -36,7 +36,7 @@ use adbc::{
 };
 
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
-use convert::SqliteReader;
+use convert::{batch_row_to_params, SqliteReader};
 
 // ─────────────────────────────────────────────────────────────
 // SqliteDriver
@@ -395,8 +395,9 @@ impl Statement for SqliteStatement {
         match &self.mode {
             Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
+                let params = extract_bound_params(&self.bound_data);
                 self.with_conn(move |s| {
-                    let reader = SqliteReader::execute(&s.conn, &sql)?;
+                    let reader = SqliteReader::execute(&s.conn, &sql, params.as_deref())?;
                     Ok((Box::new(reader) as Box<dyn RecordBatchReader + Send>, None))
                 })
                 .await
@@ -410,12 +411,24 @@ impl Statement for SqliteStatement {
         match &self.mode {
             Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
-                self.with_conn(move |s| {
-                    let before = s.conn.total_changes();
-                    s.conn
-                        .execute_batch(&sql)
-                        .map_err(|e| Error::internal(e.to_string()))?;
-                    Ok((s.conn.total_changes() - before) as i64)
+                let params = extract_bound_params(&self.bound_data);
+                self.with_conn(move |s| match params {
+                    Some(p) => {
+                        let param_refs: Vec<&dyn rusqlite::ToSql> =
+                            p.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                        let changed = s
+                            .conn
+                            .execute(&sql, param_refs.as_slice())
+                            .map_err(|e| Error::internal(e.to_string()))?;
+                        Ok(changed as i64)
+                    }
+                    None => {
+                        let before = s.conn.total_changes();
+                        s.conn
+                            .execute_batch(&sql)
+                            .map_err(|e| Error::internal(e.to_string()))?;
+                        Ok((s.conn.total_changes() - before) as i64)
+                    }
                 })
                 .await
             }
@@ -476,4 +489,18 @@ impl Statement for SqliteStatement {
             ))),
         }
     }
+}
+
+/// Extract bound parameters from a single-row RecordBatch, if present.
+///
+/// Returns `None` if no data was bound or the batch is empty.
+fn extract_bound_params(
+    bound_data: &Option<Vec<RecordBatch>>,
+) -> Option<Vec<rusqlite::types::Value>> {
+    let batches = bound_data.as_ref()?;
+    let batch = batches.first()?;
+    if batch.num_rows() == 0 {
+        return None;
+    }
+    batch_row_to_params(batch, 0).ok()
 }

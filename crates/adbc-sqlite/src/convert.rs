@@ -27,7 +27,14 @@ impl SqliteReader {
     ///
     /// Builds Arrow column arrays directly using builders, avoiding an
     /// intermediate `Vec<Vec<Value>>` allocation.
-    pub fn execute(conn: &Connection, sql: &str) -> Result<Self> {
+    ///
+    /// If `params` is provided, they are bound as positional parameters to the
+    /// prepared statement.
+    pub fn execute(
+        conn: &Connection,
+        sql: &str,
+        params: Option<&[rusqlite::types::Value]>,
+    ) -> Result<Self> {
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| Error::new(e.to_string(), Status::InvalidArguments))?;
@@ -42,7 +49,12 @@ impl SqliteReader {
         let mut columns: Vec<Vec<rusqlite::types::Value>> =
             (0..col_count).map(|_| Vec::new()).collect();
 
-        let mut row_iter = stmt.query([]).map_err(|e| Error::internal(e.to_string()))?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params
+            .map(|p| p.iter().map(|v| v as &dyn rusqlite::ToSql).collect())
+            .unwrap_or_default();
+        let mut row_iter = stmt
+            .query(param_refs.as_slice())
+            .map_err(|e| Error::internal(e.to_string()))?;
 
         while let Some(row) = row_iter
             .next()
@@ -343,8 +355,26 @@ fn array_value(col: &dyn Array, row: usize) -> Result<rusqlite::types::Value> {
                 .ok_or_else(|| Error::internal("unexpected array type: expected StringArray"))?;
             Ok(Value::Text(a.value(row).to_owned()))
         }
+        DataType::Binary => {
+            use arrow_array::BinaryArray;
+            let a = col
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| Error::internal("unexpected array type: expected BinaryArray"))?;
+            Ok(Value::Blob(a.value(row).to_vec()))
+        }
         dt => Err(Error::not_impl(format!("unsupported Arrow type: {:?}", dt))),
     }
+}
+
+/// Extract a single row of rusqlite params from a bound RecordBatch.
+///
+/// Used by `execute` and `execute_update` to pass bound parameters to
+/// parameterized SQL queries.
+pub fn batch_row_to_params(batch: &RecordBatch, row: usize) -> Result<Vec<rusqlite::types::Value>> {
+    (0..batch.num_columns())
+        .map(|col| array_value(batch.column(col).as_ref(), row))
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────
