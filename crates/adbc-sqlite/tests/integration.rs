@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use arrow_array::{cast::AsArray, Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use arrow_array::{
+    cast::AsArray, Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+};
 use arrow_schema::{DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
 
@@ -329,7 +331,11 @@ async fn ingest_roundtrip() {
     assert!((vals.value(0) - 1.1).abs() < f64::EPSILON);
     assert!((vals.value(1) - 2.2).abs() < f64::EPSILON);
     assert!((vals.value(2) - 3.3).abs() < f64::EPSILON);
-    let names = got.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+    let names = got
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
     assert_eq!(names.value(0), "a");
     assert_eq!(names.value(1), "b");
     assert_eq!(names.value(2), "c");

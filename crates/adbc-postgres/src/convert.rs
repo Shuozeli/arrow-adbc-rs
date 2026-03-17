@@ -330,64 +330,61 @@ pub fn batch_row_to_params(
         .map(|ci| {
             let col = batch.column(ci).as_ref();
             if col.is_null(row) {
-                return Ok(
-                    Box::new(Option::<String>::None)
-                        as Box<dyn tokio_postgres::types::ToSql + Sync + Send>,
-                );
+                return Ok(Box::new(Option::<String>::None)
+                    as Box<dyn tokio_postgres::types::ToSql + Sync + Send>);
             }
-            let val: Box<dyn tokio_postgres::types::ToSql + Sync + Send> =
-                match col.data_type() {
-                    DataType::Boolean => Box::new(
-                        col.as_any()
-                            .downcast_ref::<BooleanArray>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Boolean"))?
-                            .value(row),
-                    ),
-                    DataType::Int16 => Box::new(
-                        col.as_any()
-                            .downcast_ref::<Int16Array>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Int16"))?
-                            .value(row),
-                    ),
-                    DataType::Int32 => Box::new(
-                        col.as_any()
-                            .downcast_ref::<Int32Array>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Int32"))?
-                            .value(row),
-                    ),
-                    DataType::Int64 => Box::new(
-                        col.as_any()
-                            .downcast_ref::<Int64Array>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Int64"))?
-                            .value(row),
-                    ),
-                    DataType::Float32 => Box::new(
-                        col.as_any()
-                            .downcast_ref::<Float32Array>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Float32"))?
-                            .value(row),
-                    ),
-                    DataType::Float64 => Box::new(
-                        col.as_any()
-                            .downcast_ref::<Float64Array>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Float64"))?
-                            .value(row),
-                    ),
-                    DataType::Binary => Box::new(
-                        col.as_any()
-                            .downcast_ref::<BinaryArray>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Binary"))?
-                            .value(row)
-                            .to_vec(),
-                    ),
-                    _ => Box::new(
-                        col.as_any()
-                            .downcast_ref::<StringArray>()
-                            .ok_or_else(|| Error::internal("unexpected array type for Utf8"))?
-                            .value(row)
-                            .to_owned(),
-                    ),
-                };
+            let val: Box<dyn tokio_postgres::types::ToSql + Sync + Send> = match col.data_type() {
+                DataType::Boolean => Box::new(
+                    col.as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Boolean"))?
+                        .value(row),
+                ),
+                DataType::Int16 => Box::new(
+                    col.as_any()
+                        .downcast_ref::<Int16Array>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Int16"))?
+                        .value(row),
+                ),
+                DataType::Int32 => Box::new(
+                    col.as_any()
+                        .downcast_ref::<Int32Array>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Int32"))?
+                        .value(row),
+                ),
+                DataType::Int64 => Box::new(
+                    col.as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Int64"))?
+                        .value(row),
+                ),
+                DataType::Float32 => Box::new(
+                    col.as_any()
+                        .downcast_ref::<Float32Array>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Float32"))?
+                        .value(row),
+                ),
+                DataType::Float64 => Box::new(
+                    col.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Float64"))?
+                        .value(row),
+                ),
+                DataType::Binary => Box::new(
+                    col.as_any()
+                        .downcast_ref::<BinaryArray>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Binary"))?
+                        .value(row)
+                        .to_vec(),
+                ),
+                _ => Box::new(
+                    col.as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| Error::internal("unexpected array type for Utf8"))?
+                        .value(row)
+                        .to_owned(),
+                ),
+            };
             Ok(val)
         })
         .collect()

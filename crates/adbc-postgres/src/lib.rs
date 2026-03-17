@@ -405,7 +405,10 @@ impl Statement for PostgresStatement {
                     .map_err(|e| Error::invalid_arg(e.to_string()))?;
                 let schema = pg_columns_to_schema(stmt.columns());
                 let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match &params {
-                    Some(p) => p.iter().map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect(),
+                    Some(p) => p
+                        .iter()
+                        .map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                        .collect(),
                     None => vec![],
                 };
                 let rows = self
@@ -427,7 +430,10 @@ impl Statement for PostgresStatement {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
                 let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match &params {
-                    Some(p) => p.iter().map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect(),
+                    Some(p) => p
+                        .iter()
+                        .map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                        .collect(),
                     None => vec![],
                 };
                 let n = self
