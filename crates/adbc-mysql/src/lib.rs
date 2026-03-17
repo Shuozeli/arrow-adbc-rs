@@ -398,6 +398,7 @@ impl Statement for MysqlStatement {
         match &self.mode {
             Mode::Sql(sql) => {
                 let sql = sql.clone();
+                let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;
                 let stmt = inner
                     .conn
@@ -405,9 +406,13 @@ impl Statement for MysqlStatement {
                     .await
                     .map_err(|e| Error::io(e.to_string()))?;
                 let schema = mysql_columns_to_schema(stmt.columns());
+                let mysql_params = match params {
+                    Some(p) => mysql_async::Params::Positional(p),
+                    None => mysql_async::Params::Empty,
+                };
                 let rows: Vec<mysql_async::Row> = inner
                     .conn
-                    .exec(&stmt, ())
+                    .exec(&stmt, mysql_params)
                     .await
                     .map_err(|e| Error::io(e.to_string()))?;
                 let batch = rows_to_batch(rows, schema)?;
@@ -422,10 +427,15 @@ impl Statement for MysqlStatement {
         match &self.mode {
             Mode::Sql(sql) => {
                 let sql = sql.clone();
+                let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;
+                let mysql_params = match params {
+                    Some(p) => mysql_async::Params::Positional(p),
+                    None => mysql_async::Params::Empty,
+                };
                 inner
                     .conn
-                    .exec_drop(&sql, ())
+                    .exec_drop(&sql, mysql_params)
                     .await
                     .map_err(|e| Error::internal(e.to_string()))?;
                 Ok(inner.conn.affected_rows() as i64)

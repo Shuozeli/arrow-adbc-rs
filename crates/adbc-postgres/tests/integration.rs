@@ -159,7 +159,7 @@ async fn conn_unknown_option() {
         .set_option(ConnectionOption::Other("bad_pg_opt".into(), "v".into()))
         .await
         .unwrap_err();
-    assert_ne!(err.status, Status::Ok);
+    assert_eq!(err.status, Status::InvalidArguments);
 }
 
 // ─────────────────────────────────────────────────────────────

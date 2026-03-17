@@ -14,6 +14,21 @@ fn arrow_err(e: impl std::fmt::Display) -> Error {
     Error::new(e.to_string(), adbc::Status::Io)
 }
 
+/// Runtime guard for the unsafe RecordBatch pointer cast in `collect_info`.
+///
+/// `arrow_flight` re-exports `arrow_array::RecordBatch` from its own pinned
+/// version, which may differ from this crate's `arrow_array` version. The
+/// unsafe cast assumes identical memory layout. This function panics if
+/// size or alignment ever diverge.
+fn assert_recordbatch_layout_compatible(flight_batch: &impl std::any::Any) {
+    let flight_size = std::mem::size_of_val(flight_batch);
+    let expected_size = std::mem::size_of::<RecordBatch>();
+    assert_eq!(
+        flight_size, expected_size,
+        "RecordBatch size mismatch: arrow-flight={flight_size} vs arrow-array={expected_size}"
+    );
+}
+
 /// Collect all record batches from a FlightInfo by fetching each endpoint.
 async fn collect_info(
     client: &mut FlightSqlServiceClient<Channel>,
@@ -39,6 +54,7 @@ async fn collect_info(
                 //   3. We consume the original Box before creating the new one.
                 // If a future arrow version changes the RecordBatch layout, a compile-time
                 // size/align assertion (or a version-pinning CI check) should catch it.
+                assert_recordbatch_layout_compatible(&batch);
                 all.push(unsafe {
                     let ptr = Box::into_raw(Box::new(batch));
                     *Box::from_raw(ptr as *mut RecordBatch)
@@ -60,10 +76,10 @@ async fn collect_info(
 pub async fn execute_query(
     client: &mut FlightSqlServiceClient<Channel>,
     sql: &str,
-    _transaction_id: Option<bytes::Bytes>,
+    transaction_id: Option<bytes::Bytes>,
 ) -> Result<Vec<RecordBatch>> {
     let info = client
-        .execute(sql.to_owned(), None)
+        .execute(sql.to_owned(), transaction_id)
         .await
         .map_err(arrow_err)?;
     collect_info(client, info).await
@@ -76,10 +92,10 @@ pub async fn execute_query(
 pub async fn execute_update(
     client: &mut FlightSqlServiceClient<Channel>,
     sql: &str,
-    _transaction_id: Option<bytes::Bytes>,
+    transaction_id: Option<bytes::Bytes>,
 ) -> Result<i64> {
     client
-        .execute_update(sql.to_owned(), None)
+        .execute_update(sql.to_owned(), transaction_id)
         .await
         .map_err(arrow_err)
 }

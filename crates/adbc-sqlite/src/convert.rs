@@ -236,8 +236,9 @@ pub fn ingest_batches(
     );
 
     // Wrap all inserts in a transaction for atomicity and performance.
-    let in_explicit_txn = conn.is_autocommit();
-    if in_explicit_txn {
+    // When autocommit is on, we need to begin our own transaction.
+    let needs_txn = conn.is_autocommit();
+    if needs_txn {
         conn.execute_batch("BEGIN")
             .map_err(|e| Error::internal(e.to_string()))?;
     }
@@ -263,7 +264,7 @@ pub fn ingest_batches(
         Ok(total)
     })();
 
-    if in_explicit_txn {
+    if needs_txn {
         match &result {
             Ok(_) => {
                 conn.execute_batch("COMMIT")

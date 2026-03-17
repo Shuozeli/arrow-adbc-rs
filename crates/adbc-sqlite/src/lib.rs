@@ -374,10 +374,10 @@ impl Statement for SqliteStatement {
         match &self.mode {
             Mode::Sql(sql) => {
                 let sql = sql.clone();
-                let sql_clone = sql.clone();
+                let sql_for_closure = sql.clone();
                 self.with_conn(move |s| {
                     s.conn
-                        .prepare(&sql_clone)
+                        .prepare(&sql_for_closure)
                         .map_err(|e| Error::invalid_arg(e.to_string()))?;
                     Ok(())
                 })

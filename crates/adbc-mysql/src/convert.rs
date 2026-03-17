@@ -397,6 +397,23 @@ fn downcast_col<'a, T: 'static>(col: &'a dyn Array, type_name: &str) -> Result<&
         .ok_or_else(|| Error::internal(format!("unexpected array type for {type_name}")))
 }
 
+/// Extract the first row of a bound [`RecordBatch`] as positional MySQL params.
+pub fn batch_row_to_params(batch: &RecordBatch, row: usize) -> Result<Vec<Value>> {
+    (0..batch.num_columns())
+        .map(|ci| col_to_value(batch.column(ci).as_ref(), row))
+        .collect()
+}
+
+/// Extract bound parameters from the first row of the first bound batch.
+pub fn extract_bound_params(bound_data: &Option<Vec<RecordBatch>>) -> Option<Vec<Value>> {
+    let batches = bound_data.as_ref()?;
+    let batch = batches.first()?;
+    if batch.num_rows() == 0 {
+        return None;
+    }
+    batch_row_to_params(batch, 0).ok()
+}
+
 fn col_to_value(col: &dyn Array, row: usize) -> Result<Value> {
     use arrow_array::*;
     if col.is_null(row) {

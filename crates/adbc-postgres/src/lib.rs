@@ -39,7 +39,7 @@ use adbc::{
     IngestMode, IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementOption,
 };
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
-use convert::{pg_columns_to_schema, rows_to_batch};
+use convert::{extract_bound_params, pg_columns_to_schema, rows_to_batch};
 
 // ─────────────────────────────────────────────────────────────
 // PostgresDriver
@@ -397,15 +397,20 @@ impl Statement for PostgresStatement {
         match &self.mode {
             Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
+                let params = extract_bound_params(&self.bound_data);
                 let stmt = self
                     .client
                     .prepare(&sql)
                     .await
                     .map_err(|e| Error::invalid_arg(e.to_string()))?;
                 let schema = pg_columns_to_schema(stmt.columns());
+                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match &params {
+                    Some(p) => p.iter().map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect(),
+                    None => vec![],
+                };
                 let rows = self
                     .client
-                    .query(&stmt, &[])
+                    .query(&stmt, &param_refs)
                     .await
                     .map_err(|e| Error::io(e.to_string()))?;
                 let batch = rows_to_batch(&rows, schema)?;
@@ -420,9 +425,14 @@ impl Statement for PostgresStatement {
         match &self.mode {
             Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
+                let params = extract_bound_params(&self.bound_data);
+                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match &params {
+                    Some(p) => p.iter().map(|v| v.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect(),
+                    None => vec![],
+                };
                 let n = self
                     .client
-                    .execute(sql.as_str(), &[])
+                    .execute(sql.as_str(), &param_refs)
                     .await
                     .map_err(|e| Error::internal(e.to_string()))?;
                 Ok(n as i64)

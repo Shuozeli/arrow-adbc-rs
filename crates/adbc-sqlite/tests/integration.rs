@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use arrow_array::{cast::AsArray, Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
 
@@ -132,7 +132,7 @@ async fn conn_unknown_option() {
         .set_option(ConnectionOption::Other("x".into(), "v".into()))
         .await
         .unwrap_err();
-    assert_ne!(err.status, Status::Ok);
+    assert_eq!(err.status, Status::InvalidArguments);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -320,6 +320,19 @@ async fn ingest_roundtrip() {
     for (i, f) in input.schema().fields().iter().enumerate() {
         assert_eq!(got.schema().field(i).name(), f.name());
     }
+    // Verify actual cell values, not just shape.
+    let ids: &Int64Array = got.column(0).as_primitive();
+    assert_eq!(ids.value(0), 1);
+    assert_eq!(ids.value(1), 2);
+    assert_eq!(ids.value(2), 3);
+    let vals: &Float64Array = got.column(1).as_primitive();
+    assert!((vals.value(0) - 1.1).abs() < f64::EPSILON);
+    assert!((vals.value(1) - 2.2).abs() < f64::EPSILON);
+    assert!((vals.value(2) - 3.3).abs() < f64::EPSILON);
+    let names = got.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(names.value(0), "a");
+    assert_eq!(names.value(1), "b");
+    assert_eq!(names.value(2), "c");
     conn.rollback().await.unwrap();
 }
 

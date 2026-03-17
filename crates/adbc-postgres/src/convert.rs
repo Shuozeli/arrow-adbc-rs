@@ -316,6 +316,96 @@ fn escape_copy_text(s: &str) -> String {
 }
 
 // -----------------------------------------------------------------
+// Bound parameter extraction
+// -----------------------------------------------------------------
+
+/// Extract the first row of a bound [`RecordBatch`] as a vector of boxed
+/// `ToSql` values suitable for passing to `tokio_postgres` query/execute.
+pub fn batch_row_to_params(
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>> {
+    use arrow_array::*;
+    (0..batch.num_columns())
+        .map(|ci| {
+            let col = batch.column(ci).as_ref();
+            if col.is_null(row) {
+                return Ok(
+                    Box::new(Option::<String>::None)
+                        as Box<dyn tokio_postgres::types::ToSql + Sync + Send>,
+                );
+            }
+            let val: Box<dyn tokio_postgres::types::ToSql + Sync + Send> =
+                match col.data_type() {
+                    DataType::Boolean => Box::new(
+                        col.as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Boolean"))?
+                            .value(row),
+                    ),
+                    DataType::Int16 => Box::new(
+                        col.as_any()
+                            .downcast_ref::<Int16Array>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Int16"))?
+                            .value(row),
+                    ),
+                    DataType::Int32 => Box::new(
+                        col.as_any()
+                            .downcast_ref::<Int32Array>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Int32"))?
+                            .value(row),
+                    ),
+                    DataType::Int64 => Box::new(
+                        col.as_any()
+                            .downcast_ref::<Int64Array>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Int64"))?
+                            .value(row),
+                    ),
+                    DataType::Float32 => Box::new(
+                        col.as_any()
+                            .downcast_ref::<Float32Array>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Float32"))?
+                            .value(row),
+                    ),
+                    DataType::Float64 => Box::new(
+                        col.as_any()
+                            .downcast_ref::<Float64Array>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Float64"))?
+                            .value(row),
+                    ),
+                    DataType::Binary => Box::new(
+                        col.as_any()
+                            .downcast_ref::<BinaryArray>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Binary"))?
+                            .value(row)
+                            .to_vec(),
+                    ),
+                    _ => Box::new(
+                        col.as_any()
+                            .downcast_ref::<StringArray>()
+                            .ok_or_else(|| Error::internal("unexpected array type for Utf8"))?
+                            .value(row)
+                            .to_owned(),
+                    ),
+                };
+            Ok(val)
+        })
+        .collect()
+}
+
+/// Extract bound parameters from the first row of the first bound batch.
+pub fn extract_bound_params(
+    bound_data: &Option<Vec<RecordBatch>>,
+) -> Option<Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>> {
+    let batches = bound_data.as_ref()?;
+    let batch = batches.first()?;
+    if batch.num_rows() == 0 {
+        return None;
+    }
+    batch_row_to_params(batch, 0).ok()
+}
+
+// -----------------------------------------------------------------
 // helpers
 // -----------------------------------------------------------------
 
