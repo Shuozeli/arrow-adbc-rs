@@ -29,8 +29,11 @@ ADBC_MYSQL_URI="mysql://adbc_test:adbc_test@localhost:3306/adbc_test" \
 
 | Test                         | Description                                                                  |
 | ---------------------------- | ---------------------------------------------------------------------------- |
-| `conn_autocommit_toggle`     | Disable autocommit -> rollback -> re-enable                                  |
-| `conn_transaction_isolation` | Table pre-dropped; row inserted and visible within tx; DML rolled back after |
+| `conn_autocommit_toggle`            | Disable autocommit -> rollback -> re-enable                                  |
+| `conn_commit_in_autocommit_fails`  | `commit()` in autocommit mode -> `InvalidState`                              |
+| `conn_rollback_in_autocommit_fails`| `rollback()` in autocommit mode -> `InvalidState`                            |
+| `conn_unknown_option`              | Unknown connection option -> `InvalidArguments`                              |
+| `conn_transaction_isolation`       | Table pre-dropped; row inserted and visible within tx; DML rolled back after |
 
 ## Metadata
 

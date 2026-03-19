@@ -126,19 +126,6 @@ async fn flightsql_get_objects() {
     let _ = rows; // may be 0 if no tables
 }
 
-/// get_table_schema on a missing table → NotFound.
-#[tokio::test]
-#[ignore = "requires ADBC_FLIGHTSQL_URI environment variable"]
-async fn flightsql_get_table_schema_missing() {
-    let db = connect().await;
-    let conn = db.new_connection().await.unwrap();
-    let err = conn
-        .get_table_schema(None, None, "no_such_table_xyz")
-        .await
-        .unwrap_err();
-    assert_eq!(err.status, Status::NotFound);
-}
-
 // ─────────────────────────────────────────────────────────────
 // Queries
 // ─────────────────────────────────────────────────────────────
@@ -198,16 +185,15 @@ async fn flightsql_ingest_not_implemented() {
     assert_eq!(err.status, Status::NotImplemented);
 }
 
-/// get_table_schema returns NotImplemented (documented gap).
+/// get_table_schema returns NotFound for a table that does not exist.
 #[tokio::test]
 #[ignore = "requires ADBC_FLIGHTSQL_URI environment variable"]
-async fn flightsql_get_table_schema_not_impl() {
+async fn flightsql_get_table_schema_not_found() {
     let db = connect().await;
-    // Note: get_table_schema is stubbed as NotImplemented in this driver.
     let conn = db.new_connection().await.unwrap();
     let err = conn
-        .get_table_schema(None, None, "any_table")
+        .get_table_schema(None, None, "no_such_table_xyz_adbc_test")
         .await
         .unwrap_err();
-    assert_eq!(err.status, Status::NotImplemented);
+    assert_eq!(err.status, Status::NotFound);
 }

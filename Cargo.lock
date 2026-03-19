@@ -8,6 +8,7 @@ version = "0.2.0"
 dependencies = [
  "arrow-array 58.0.0",
  "arrow-schema 58.0.0",
+ "arrow-select 58.0.0",
 ]
 
 [[package]]
@@ -17,6 +18,7 @@ dependencies = [
  "adbc",
  "arrow-array 58.0.0",
  "arrow-flight",
+ "arrow-ipc 58.0.0",
  "arrow-schema 58.0.0",
  "arrow-select 58.0.0",
  "bytes",
@@ -246,7 +248,7 @@ dependencies = [
  "arrow-buffer 55.2.0",
  "arrow-cast",
  "arrow-data 55.2.0",
- "arrow-ipc",
+ "arrow-ipc 55.2.0",
  "arrow-ord",
  "arrow-row",
  "arrow-schema 55.2.0",
@@ -272,6 +274,20 @@ dependencies = [
  "arrow-buffer 55.2.0",
  "arrow-data 55.2.0",
  "arrow-schema 55.2.0",
+ "flatbuffers",
+]
+
+[[package]]
+name = "arrow-ipc"
+version = "58.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7968c2e5210c41f4909b2ef76f6e05e172b99021c2def5edf3cc48fdd39d1d6c"
+dependencies = [
+ "arrow-array 58.0.0",
+ "arrow-buffer 58.0.0",
+ "arrow-data 58.0.0",
+ "arrow-schema 58.0.0",
+ "arrow-select 58.0.0",
  "flatbuffers",
 ]
 

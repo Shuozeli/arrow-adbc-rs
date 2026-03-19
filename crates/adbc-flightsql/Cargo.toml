@@ -24,6 +24,7 @@ bytes.workspace = true
 tokio-stream.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+arrow-ipc.workspace = true
 
 [dev-dependencies]
 # Integration tests require a live FlightSQL server — marked #[ignore] by default.

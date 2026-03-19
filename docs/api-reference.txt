@@ -1,0 +1,219 @@
+arrow-adbc-rs API Reference
+============================
+Generated from source code. Covers all public types and trait methods.
+
+================================================================================
+CORE CRATE: adbc
+================================================================================
+
+--- TRAIT: Driver (driver.rs:163) ---
+  Associated: DatabaseType: Database
+  fn new_database() -> Future<Result<DatabaseType>>
+  fn new_database_with_opts(opts: IntoIterator<(DatabaseOption, OptionValue)>) -> Future<Result<DatabaseType>>
+
+--- TRAIT: Database (driver.rs:182) ---
+  Associated: ConnectionType: Connection
+  fn new_connection() -> Future<Result<ConnectionType>>
+  fn new_connection_with_opts(opts: IntoIterator<ConnectionOption>) -> Future<Result<ConnectionType>>
+
+--- TRAIT: Connection (driver.rs:210) ---
+  Associated: StatementType: Statement
+  fn new_statement() -> Future<Result<StatementType>>
+  fn set_option(opt: ConnectionOption) -> Future<Result<()>>
+  fn commit() -> Future<Result<()>>
+  fn rollback() -> Future<Result<()>>
+  fn get_table_schema(catalog?, db_schema?, name) -> Future<Result<Schema>>
+  fn get_table_types() -> Future<Result<Box<dyn RecordBatchReader + Send>>>
+  fn get_info(codes: Option<&[InfoCode]>) -> Future<Result<Box<dyn RecordBatchReader + Send>>>
+  fn get_objects(depth, catalog?, db_schema?, table_name?, table_type?, column_name?) -> Future<Result<Box<dyn RecordBatchReader + Send>>>
+
+--- TRAIT: Statement (driver.rs:277) ---
+  fn set_sql_query(&mut self, sql: &str) -> Future<Result<()>>
+  fn prepare(&mut self) -> Future<Result<()>>
+  fn execute(&mut self) -> Future<Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)>>
+  fn execute_update(&mut self) -> Future<Result<i64>>
+  fn bind(&mut self, batch: RecordBatch) -> Future<Result<()>>
+  fn bind_stream(&mut self, reader: Box<dyn RecordBatchReader + Send>) -> Future<Result<()>>
+  fn set_option(&mut self, opt: StatementOption) -> Future<Result<()>>
+
+--- TRAIT: DynConnection (dyn_api.rs:98) ---
+  Object-safe version of Connection, uses BoxFuture.
+  Same methods as Connection but returns Box<dyn DynStatement> instead of StatementType.
+  Blanket impl for all T: Connection where T::StatementType: 'static.
+
+--- TRAIT: DynStatement (dyn_api.rs:34) ---
+  Object-safe version of Statement, uses BoxFuture.
+  Blanket impl for all T: Statement.
+
+--- ENUM: OptionValue (driver.rs:19) ---
+  String(String), Int(i64), Double(f64), Bytes(Vec<u8>)
+  From impls: &str, String, i64, f64, Vec<u8>
+
+--- ENUM: DatabaseOption (driver.rs:54) ---
+  Uri, Username, Password, Other(String)
+
+--- ENUM: ConnectionOption (driver.rs:67) ---
+  AutoCommit(bool), ReadOnly(bool), IsolationLevel(IsolationLevel), Other(String, OptionValue)
+
+--- ENUM: StatementOption (driver.rs:80) ---
+  TargetTable(String), IngestMode(IngestMode), Other(String, OptionValue)
+
+--- ENUM: IsolationLevel (driver.rs:91) ---
+  Default, ReadUncommitted, ReadCommitted, RepeatableRead, Serializable, Linearizable
+
+--- ENUM: IngestMode (driver.rs:102) ---
+  Create, Append, Replace, CreateAppend
+
+--- ENUM: ObjectDepth (driver.rs:115) ---
+  All, Catalogs, Schemas, Tables, Columns
+
+--- ENUM: InfoCode (driver.rs:132) ---
+  #[repr(u32)]
+  VendorName=0, VendorVersion=1, VendorArrowVersion=2, VendorSql=3, VendorSubstrait=4
+  DriverName=100, DriverVersion=101, DriverArrowVersion=102, DriverAdbcVersion=103
+
+--- ENUM: Status (error.rs:6) ---
+  Ok, Unknown, NotImplemented, NotFound, AlreadyExists, InvalidArguments,
+  InvalidState, Io, Internal, Unauthenticated, Unauthorized, Cancelled, Timeout
+
+--- STRUCT: Error (error.rs:62) ---
+  Fields: message: String, status: Status, vendor_code: Option<i32>, sqlstate: Option<[u8; 5]>
+  Constructors: new(), not_impl(), invalid_arg(), invalid_state(), not_found(), internal(), io(), already_exists()
+  Implements: Display, std::error::Error
+
+--- TYPE ALIAS: Result<T> (error.rs:129) ---
+  std::result::Result<T, Error>
+
+--- STRUCT: TrustedSql (sql.rs:76) ---
+  Methods: from_raw(String, Seal), as_str() -> &str, push(&mut, &TrustedSql), push_static(&mut, &'static str)
+  Implements: Display, SqlSafe
+
+--- STRUCT: QuotedIdent (sql.rs:129) ---
+  Constructors: ansi(name: &str), mysql(name: &str)
+  Implements: Display, SqlSafe
+
+--- STRUCT: SqlLiteral (sql.rs:164) ---
+  SqlLiteral(pub &'static str)
+  Implements: Display, SqlSafe
+
+--- STRUCT: SqlJoined (sql.rs:192) ---
+  Constructor: new<T: SqlSafe>(items, sep: &'static str)
+  Implements: Display, SqlSafe
+
+--- STRUCT: SqlColumnDef (sql.rs:229) ---
+  Constructor: new(ident: &QuotedIdent, type_name: SqlLiteral)
+  Implements: Display, SqlSafe
+
+--- STRUCT: SqlPlaceholders (sql.rs:267) ---
+  Constructors: anonymous(n), dollar(n), indexed(n)
+  Implements: Display, SqlSafe
+
+--- MACRO: trusted_sql! (sql.rs:338) ---
+  trusted_sql!("literal")
+  trusted_sql!("format {} {}", sql_safe_val1, sql_safe_val2)
+
+--- STRUCT: OneBatch (helpers.rs:19) ---
+  Constructor: new(batch: RecordBatch)
+  Implements: Iterator, RecordBatchReader
+
+--- STRUCT: VecReader (helpers.rs:53) ---
+  Constructor: new(batches: Vec<RecordBatch>)
+  Implements: Iterator, RecordBatchReader
+
+--- FUNCTION: require_string (helpers.rs:93) ---
+  fn require_string(v: OptionValue, name: &str) -> Result<String>
+
+--- SCHEMAS (schema.rs) ---
+  TABLE_TYPES_SCHEMA: {table_type: Utf8}
+  GET_INFO_SCHEMA: {info_name: UInt32, info_value: DenseUnion[string,bool,int64,int32,string_list,int32_map]}
+  GET_OBJECTS_SCHEMA: {catalog_name: Utf8?, catalog_db_schemas: List<DB_SCHEMA_SCHEMA>}
+  DB_SCHEMA_SCHEMA: Struct{db_schema_name: Utf8?, db_schema_tables: List<TABLE_SCHEMA>}
+  TABLE_SCHEMA: Struct{table_name, table_type, table_columns: List<COLUMN_SCHEMA>, table_constraints: List<CONSTRAINT_SCHEMA>}
+  COLUMN_SCHEMA: Struct with 19 fields (column_name + 18 xdbc_* fields)
+  CONSTRAINT_SCHEMA: Struct{constraint_name, constraint_type, constraint_column_names, constraint_column_usage}
+  USAGE_SCHEMA: Struct{fk_catalog, fk_db_schema, fk_table, fk_column_name}
+
+================================================================================
+DRIVER CRATE: adbc-sqlite
+================================================================================
+
+--- STRUCT: SqliteDriver (Default, Debug, Clone, Copy) ---
+  Implements: Driver (DatabaseType = SqliteDatabase)
+
+--- STRUCT: SqliteDatabase (Debug, Clone) ---
+  Default URI: ":memory:"
+  Implements: Database (ConnectionType = SqliteConnection)
+
+--- STRUCT: SqliteConnection ---
+  Internal: Arc<Mutex<SqliteInner>> (rusqlite::Connection + autocommit/in_transaction flags)
+  Helper: with_conn<F, T>(f: FnOnce(&mut SqliteInner) -> Result<T>) -- spawn_blocking bridge
+  Drop: rolls back open transaction
+  Implements: Connection (StatementType = SqliteStatement)
+
+--- STRUCT: SqliteStatement ---
+  Internal: Arc<Mutex<SqliteInner>>, Mode enum, bound_data: Option<Vec<RecordBatch>>
+  Implements: Statement
+
+================================================================================
+DRIVER CRATE: adbc-postgres
+================================================================================
+
+--- STRUCT: PostgresDriver (Default, Debug, Clone, Copy) ---
+  Implements: Driver (DatabaseType = PostgresDatabase)
+
+--- STRUCT: PostgresDatabase (Debug, Clone) ---
+  Default conn_str: "host=localhost port=5432 dbname=postgres"
+  Feature "tls": enables rustls-based TLS connections
+  Implements: Database (ConnectionType = PostgresConnection)
+
+--- STRUCT: PostgresConnection ---
+  Internal: Arc<tokio_postgres::Client> + Mutex<PgState>
+  Implements: Connection (StatementType = PostgresStatement)
+
+--- STRUCT: PostgresStatement ---
+  Internal: Arc<tokio_postgres::Client>, Mode enum, bound_data
+  Implements: Statement
+
+================================================================================
+DRIVER CRATE: adbc-mysql
+================================================================================
+
+--- STRUCT: MysqlDriver (Default, Debug, Clone, Copy) ---
+  Implements: Driver (DatabaseType = MysqlDatabase)
+
+--- STRUCT: MysqlDatabase ---
+  Uses connection pool via tokio::sync::OnceCell<mysql_async::Pool>
+  Default URI: "mysql://root@localhost:3306/"
+  Implements: Database (ConnectionType = MysqlConnection)
+
+--- STRUCT: MysqlConnection ---
+  Internal: Arc<Mutex<MysqlInner>> (mysql_async::Conn + autocommit flag)
+  Implements: Connection (StatementType = MysqlStatement)
+
+--- STRUCT: MysqlStatement ---
+  Internal: Arc<Mutex<MysqlInner>>, Mode enum, bound_data
+  No Prepared mode (MySQL prepare is a no-op at driver level)
+  Implements: Statement
+
+================================================================================
+DRIVER CRATE: adbc-flightsql
+================================================================================
+
+--- STRUCT: FlightSqlDriver (Default, Debug, Clone, Copy) ---
+  Implements: Driver (DatabaseType = FlightSqlDatabase)
+
+--- STRUCT: FlightSqlDatabase (Debug, Clone) ---
+  Default URI: "grpc://localhost:32010"
+  URI schemes: grpc:// (plaintext), grpc+tls:// (TLS, requires "tls" feature)
+  Implements: Database (ConnectionType = FlightSqlConnection)
+
+--- STRUCT: FlightSqlConnection ---
+  Internal: Mutex<FlightSqlInner> (client + autocommit + transaction_id)
+  Transaction: FlightSQL begin_transaction/end_transaction RPCs
+  Implements: Connection (StatementType = FlightSqlStatement)
+
+--- STRUCT: FlightSqlStatement ---
+  Internal: client clone, transaction_id, StmtMode, bound_data
+  StmtMode: Idle, Sql, Prepared{query}, Ingest{table, mode}
+  Implements: Statement
+  Known gaps: ingest not supported, execute_update on prepared not supported

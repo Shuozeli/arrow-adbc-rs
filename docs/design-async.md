@@ -1,10 +1,15 @@
 # Design: Async-First ADBC Traits
 
-## Problem
+> **Status: COMPLETED.** This migration was implemented in v0.2.0 (commit `36631f5`).
+> All traits are now async-first. The sync `postgres` and `mysql` crates have been
+> replaced with `tokio-postgres` and `mysql_async`. The FlightSQL `block()` bridge
+> has been removed. This document is preserved as a design record.
 
-The current ADBC traits (`Driver`, `Database`, `Connection`, `Statement`) are
-synchronous. FlightSQL bridges async gRPC calls to the sync interface via a
-`block()` helper that creates or enters a Tokio runtime. This works but has
+## Problem (pre-v0.2.0)
+
+The ADBC traits (`Driver`, `Database`, `Connection`, `Statement`) were
+synchronous. FlightSQL bridged async gRPC calls to the sync interface via a
+`block()` helper that created or entered a Tokio runtime. This worked but had
 drawbacks:
 
 1. **Callers in async contexts must spawn_blocking**: Any Quiver/ADBC consumer
@@ -376,19 +381,20 @@ impl<T: Connection> DynConnection for T {
 }
 ```
 
-## Migration Checklist
+## Migration Checklist (all completed in v0.2.0)
 
-- [ ] Update `adbc/src/driver.rs`: async traits + Send + Sync bounds
-- [ ] Add `adbc/src/sync.rs`: `block_on()` helper
-- [ ] Add `adbc/src/dyn_api.rs`: `DynConnection` for trait objects
-- [ ] Update `adbc-sqlite`: `spawn_blocking` wrapper, add `tokio` dep
-- [ ] Update `adbc-postgres`: replace `postgres` with `tokio-postgres`
-- [ ] Update `adbc-mysql`: replace `mysql` with `mysql_async`
-- [ ] Update `adbc-flightsql`: remove `block()`, use async directly
-- [ ] Update all tests to use `#[tokio::test]`
-- [ ] Update `Cargo.toml` workspace deps
-- [ ] Update docs (architecture.md, driver docs)
-- [ ] Bump version to 0.2.0 (breaking change)
+- [x] Update `adbc/src/driver.rs`: async traits + Send + Sync bounds
+- [x] Add `adbc/src/dyn_api.rs`: `DynConnection` + `DynStatement` for trait objects
+- [x] Update `adbc-sqlite`: `spawn_blocking` wrapper, add `tokio` dep
+- [x] Update `adbc-postgres`: replace `postgres` with `tokio-postgres`
+- [x] Update `adbc-mysql`: replace `mysql` with `mysql_async`
+- [x] Update `adbc-flightsql`: remove `block()`, use async directly
+- [x] Update all tests to use `#[tokio::test]`
+- [x] Update `Cargo.toml` workspace deps
+- [x] Bump version to 0.2.0 (breaking change)
+
+Note: The `block_on()` sync helper was not added to the core crate. Sync callers
+can use `tokio::runtime::Runtime::block_on()` directly.
 
 ## Impact on Quiver ORM
 

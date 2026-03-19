@@ -48,7 +48,7 @@ Follow these steps **in order** before running `cargo publish` for any crate in 
 - [ ] `[package].readme` — path to a per-crate `README.md` if one exists
 - [ ] `[package].documentation` — `https://docs.rs/<crate-name>`
 - [ ] `[package].version` — bumped appropriately per [semver](https://semver.org/)
-- [ ] `[package].rust-version` — set to MSRV (currently `1.81`)
+- [ ] `[package].rust-version` — set to MSRV (currently `1.85`)
 
 ---
 
@@ -58,7 +58,7 @@ Follow these steps **in order** before running `cargo publish` for any crate in 
       for published crates):
   ```toml
   # OK for published crates:
-  adbc = { path = "../adbc", version = "0.1.0" }
+  adbc = { path = "../adbc", version = "0.2.0" }
   ```
 - [ ] All `workspace.dependencies` have explicit version ranges (no `*`)
 - [ ] Run `cargo tree --duplicates` and review any duplicate transitive deps
@@ -112,4 +112,4 @@ cargo publish -p adbc-flightsql
 
 - [ ] `cargo add adbc` in a scratch project resolves from crates.io
 - [ ] `https://docs.rs/<crate-name>` shows the rendered docs (may take a few minutes)
-- [ ] GitHub release tag created: `git tag v0.1.0 && git push origin v0.1.0`
+- [ ] GitHub release tag created: `git tag v0.2.0 && git push origin v0.2.0`

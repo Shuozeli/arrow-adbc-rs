@@ -31,5 +31,5 @@ pub use driver::{
 };
 pub use dyn_api::{DynConnection, DynStatement};
 pub use error::{Error, Result, Status};
-pub use helpers::{OneBatch, VecReader};
+pub use helpers::{collect_reader, OneBatch, VecReader};
 pub use sql::{QuotedIdent, SqlColumnDef, SqlJoined, SqlLiteral, SqlPlaceholders, TrustedSql};

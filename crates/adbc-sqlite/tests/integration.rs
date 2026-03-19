@@ -2,17 +2,15 @@
 
 use std::sync::Arc;
 
-use arrow_array::{
-    cast::AsArray, Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray,
-};
-use arrow_schema::{DataType, Field, Schema};
-use arrow_select::concat::concat_batches;
-
 use adbc::{
     Connection, ConnectionOption, Database, DatabaseOption, Driver, InfoCode, IngestMode,
     ObjectDepth, Statement, StatementOption, Status,
 };
 use adbc_sqlite::SqliteDriver;
+use arrow_array::{
+    cast::AsArray, Array, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+};
+use arrow_schema::{DataType, Field, Schema};
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -43,9 +41,7 @@ fn sample_batch() -> RecordBatch {
 }
 
 fn collect(reader: Box<dyn RecordBatchReader + Send>) -> RecordBatch {
-    let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
-    concat_batches(&schema, &batches).unwrap()
+    adbc::collect_reader(reader)
 }
 
 // ─────────────────────────────────────────────────────────────

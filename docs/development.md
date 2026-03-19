@@ -1,8 +1,10 @@
 # Development Guide
 
+> Last updated: 2026-03-19
+
 ## Prerequisites
 
-- **Rust** >= 1.81 (the MSRV set in `Cargo.toml`)
+- **Rust** >= 1.85 (the MSRV set in `Cargo.toml`)
 - `cargo` (comes with rustup)
 - No system libraries required -- SQLite is bundled via `rusqlite`'s `bundled` feature
 - **Docker** (optional, for PostgreSQL and MySQL integration tests)
@@ -100,7 +102,7 @@ they are skipped by default:
 cargo test -p adbc-flightsql
 
 # Run FlightSQL tests against a local server on the default port (32010)
-FLIGHTSQL_URI=grpc://localhost:32010 cargo test -p adbc-flightsql -- --ignored
+ADBC_FLIGHTSQL_URI=grpc://localhost:32010 cargo test -p adbc-flightsql -- --ignored
 ```
 
 ### All tests
@@ -131,44 +133,52 @@ arrow-adbc-rs/
 ├── Cargo.toml              # Workspace manifest; shared dependency versions
 ├── Cargo.lock
 │
-├── adbc/                   # Core crate (no std I/O, just traits + types)
-│   └── src/
-│       ├── lib.rs          # Re-exports everything public
-│       ├── driver.rs       # Driver / Database / Connection / Statement traits + option enums
-│       ├── error.rs        # Error, Status, Result<T>
-│       ├── helpers.rs      # Shared utilities (OneBatch, VecReader, require_string)
-│       ├── schema.rs       # Static Arrow schemas for all metadata result sets
-│       └── sql.rs          # Compile-time SQL safety (TrustedSql, QuotedIdent, etc.)
-│
-├── adbc-sqlite/            # SQLite driver
-│   └── src/
-│       ├── lib.rs          # SqliteDriver / SqliteDatabase / SqliteConnection / SqliteStatement
-│       ├── convert.rs      # Arrow <-> SQLite type mapping (SqliteReader + ingest_batches)
-│       └── catalog.rs      # get_info / get_objects / get_table_types / get_table_schema
-│
-├── adbc-flightsql/         # FlightSQL driver
-│   └── src/
-│       ├── lib.rs          # FlightSqlDriver / ... / FlightSqlStatement + async bridge
-│       └── catalog.rs      # All FlightSQL RPC wrappers
-│
-├── adbc-postgres/          # PostgreSQL driver
-│   └── src/
-│       ├── lib.rs          # PostgresDriver / PostgresDatabase / PostgresConnection / PostgresStatement
-│       ├── convert.rs      # Arrow <-> PostgreSQL type mapping
-│       └── catalog.rs      # Catalog metadata methods
-│
-├── adbc-mysql/             # MySQL driver
-│   └── src/
-│       ├── lib.rs          # MysqlDriver / MysqlDatabase / MysqlConnection / MysqlStatement
-│       ├── convert.rs      # Arrow <-> MySQL type mapping
-│       └── catalog.rs      # Catalog metadata methods
+├── crates/
+│   ├── adbc/               # Core crate (no std I/O, just traits + types)
+│   │   └── src/
+│   │       ├── lib.rs      # Re-exports everything public
+│   │       ├── driver.rs   # Driver / Database / Connection / Statement traits + option enums
+│   │       ├── error.rs    # Error, Status, Result<T>
+│   │       ├── helpers.rs  # Shared utilities (OneBatch, VecReader, require_string)
+│   │       ├── schema.rs   # Static Arrow schemas for all metadata result sets
+│   │       ├── dyn_api.rs  # Object-safe DynConnection / DynStatement wrappers
+│   │       └── sql.rs      # Compile-time SQL safety (TrustedSql, QuotedIdent, etc.)
+│   │
+│   ├── adbc-sqlite/        # SQLite driver (via rusqlite, bundled)
+│   │   └── src/
+│   │       ├── lib.rs      # SqliteDriver / SqliteDatabase / SqliteConnection / SqliteStatement
+│   │       ├── convert.rs  # Arrow <-> SQLite type mapping (SqliteReader + ingest_batches)
+│   │       └── catalog.rs  # get_info / get_objects / get_table_types / get_table_schema
+│   │
+│   ├── adbc-postgres/      # PostgreSQL driver (via tokio-postgres)
+│   │   └── src/
+│   │       ├── lib.rs      # PostgresDriver / PostgresDatabase / PostgresConnection / PostgresStatement
+│   │       ├── convert.rs  # Arrow <-> PostgreSQL type mapping + COPY ingest
+│   │       └── catalog.rs  # Catalog metadata methods
+│   │
+│   ├── adbc-mysql/         # MySQL driver (via mysql_async)
+│   │   └── src/
+│   │       ├── lib.rs      # MysqlDriver / MysqlDatabase / MysqlConnection / MysqlStatement
+│   │       ├── convert.rs  # Arrow <-> MySQL type mapping
+│   │       └── catalog.rs  # Catalog metadata methods
+│   │
+│   └── adbc-flightsql/     # FlightSQL driver (via tonic + arrow-flight)
+│       └── src/
+│           ├── lib.rs      # FlightSqlDriver / ... / FlightSqlStatement
+│           └── catalog.rs  # All FlightSQL RPC wrappers + query execution
 │
 └── docs/                   # Documentation
     ├── overview.md
     ├── architecture.md
+    ├── design-async.md     # Design record: sync-to-async migration
     ├── development.md      # <- you are here
     ├── feature-matrix.md
-    └── publish-checklist.md
+    ├── publish-checklist.md
+    ├── audit-findings.md
+    ├── postmortem-sqlite-bound-params.md
+    ├── adbc-sqlite/        # Per-driver test catalogs
+    ├── adbc-postgres/
+    └── adbc-mysql/
 ```
 
 ## Adding a New Driver

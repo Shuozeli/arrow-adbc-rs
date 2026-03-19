@@ -1,4 +1,6 @@
-# arrow-adbc-rs — Project Overview
+# arrow-adbc-rs -- Project Overview
+
+> Last updated: 2026-03-19
 
 A **clean-room, idiomatic Rust** implementation of the
 [Arrow Database Connectivity (ADBC) v1.1.0](https://arrow.apache.org/adbc/) specification.
@@ -37,16 +39,25 @@ library with dynamic loading and a thin Rust binding around it. This workspace i
 
 ```
 arrow-adbc-rs/
-├── adbc/               # Core library: traits, error types, Arrow schemas, SQL safety
-├── adbc-sqlite/        # Driver: SQLite (via bundled rusqlite)
-├── adbc-postgres/      # Driver: PostgreSQL (via postgres crate)
-├── adbc-mysql/         # Driver: MySQL (via mysql crate)
-├── adbc-flightsql/     # Driver: Apache Arrow FlightSQL (via tonic / arrow-flight)
+├── crates/
+│   ├── adbc/           # Core library: traits, error types, Arrow schemas, SQL safety
+│   ├── adbc-sqlite/    # Driver: SQLite (via bundled rusqlite)
+│   ├── adbc-postgres/  # Driver: PostgreSQL (via tokio-postgres)
+│   ├── adbc-mysql/     # Driver: MySQL (via mysql_async)
+│   └── adbc-flightsql/ # Driver: Apache Arrow FlightSQL (via tonic / arrow-flight)
+├── examples/           # Per-crate examples (analytics, ETL pipeline, inventory)
 └── docs/               # This documentation
-    ├── overview.md     # <- you are here
-    ├── architecture.md # Trait design and crate internals
-    ├── development.md  # Building, testing, and contributing
-    └── feature-matrix.md # Driver feature and test coverage
+    ├── overview.md          # <- you are here
+    ├── architecture.md      # Trait design and crate internals
+    ├── design-async.md      # Design record: sync-to-async migration (completed)
+    ├── development.md       # Building, testing, and contributing
+    ├── feature-matrix.md    # Driver feature and test coverage
+    ├── publish-checklist.md # Pre-publish checklist for crates.io
+    ├── audit-findings.md    # Code audit findings
+    ├── postmortem-sqlite-bound-params.md
+    ├── adbc-sqlite/         # Per-driver test catalogs
+    ├── adbc-postgres/
+    └── adbc-mysql/
 ```
 
 ## Quick Start
@@ -57,14 +68,14 @@ arrow-adbc-rs/
 use adbc::{Driver, Database, Connection, Statement, DatabaseOption, OptionValue};
 use adbc_sqlite::SqliteDriver;
 
-let mut drv = SqliteDriver::default();
+let drv = SqliteDriver::default();
 let db = drv.new_database_with_opts([
     (DatabaseOption::Uri, OptionValue::String(":memory:".into())),
-]).unwrap();
-let mut conn = db.new_connection().unwrap();
-let mut stmt = conn.new_statement().unwrap();
-stmt.set_sql_query("SELECT 42 AS answer").unwrap();
-let (mut reader, _) = stmt.execute().unwrap();
+]).await.unwrap();
+let conn = db.new_connection().await.unwrap();
+let mut stmt = conn.new_statement().await.unwrap();
+stmt.set_sql_query("SELECT 42 AS answer").await.unwrap();
+let (mut reader, _) = stmt.execute().await.unwrap();
 while let Some(batch) = reader.next() {
     println!("{:?}", batch.unwrap());
 }
@@ -76,16 +87,16 @@ while let Some(batch) = reader.next() {
 use adbc::{Driver, Database, Connection, Statement, DatabaseOption, OptionValue};
 use adbc_postgres::PostgresDriver;
 
-let mut drv = PostgresDriver::default();
+let drv = PostgresDriver::default();
 let db = drv.new_database_with_opts([
     (DatabaseOption::Uri, OptionValue::String(
         "host=localhost port=5432 user=myuser password=mypass dbname=mydb".into(),
     )),
-]).unwrap();
-let mut conn = db.new_connection().unwrap();
-let mut stmt = conn.new_statement().unwrap();
-stmt.set_sql_query("SELECT 42 AS answer").unwrap();
-let (mut reader, _) = stmt.execute().unwrap();
+]).await.unwrap();
+let conn = db.new_connection().await.unwrap();
+let mut stmt = conn.new_statement().await.unwrap();
+stmt.set_sql_query("SELECT 42 AS answer").await.unwrap();
+let (mut reader, _) = stmt.execute().await.unwrap();
 while let Some(batch) = reader.next() {
     println!("{:?}", batch.unwrap());
 }
@@ -97,16 +108,16 @@ while let Some(batch) = reader.next() {
 use adbc::{Driver, Database, Connection, Statement, DatabaseOption, OptionValue};
 use adbc_mysql::MysqlDriver;
 
-let mut drv = MysqlDriver::default();
+let drv = MysqlDriver::default();
 let db = drv.new_database_with_opts([
     (DatabaseOption::Uri, OptionValue::String(
         "mysql://myuser:mypass@localhost:3306/mydb".into(),
     )),
-]).unwrap();
-let mut conn = db.new_connection().unwrap();
-let mut stmt = conn.new_statement().unwrap();
-stmt.set_sql_query("SELECT 42 AS answer").unwrap();
-let (mut reader, _) = stmt.execute().unwrap();
+]).await.unwrap();
+let conn = db.new_connection().await.unwrap();
+let mut stmt = conn.new_statement().await.unwrap();
+stmt.set_sql_query("SELECT 42 AS answer").await.unwrap();
+let (mut reader, _) = stmt.execute().await.unwrap();
 while let Some(batch) = reader.next() {
     println!("{:?}", batch.unwrap());
 }
@@ -118,16 +129,16 @@ while let Some(batch) = reader.next() {
 use adbc::{Driver, Database, Connection, Statement, DatabaseOption, OptionValue};
 use adbc_flightsql::FlightSqlDriver;
 
-let mut drv = FlightSqlDriver::default();
+let drv = FlightSqlDriver::default();
 let db = drv.new_database_with_opts([
     (DatabaseOption::Uri,      OptionValue::String("grpc://localhost:32010".into())),
     (DatabaseOption::Username, OptionValue::String("admin".into())),
     (DatabaseOption::Password, OptionValue::String("password".into())),
-]).unwrap();
-let mut conn = db.new_connection().unwrap();
-let mut stmt = conn.new_statement().unwrap();
-stmt.set_sql_query("SELECT 1").unwrap();
-let (mut reader, _) = stmt.execute().unwrap();
+]).await.unwrap();
+let conn = db.new_connection().await.unwrap();
+let mut stmt = conn.new_statement().await.unwrap();
+stmt.set_sql_query("SELECT 1").await.unwrap();
+let (mut reader, _) = stmt.execute().await.unwrap();
 while let Some(batch) = reader.next() {
     println!("{:?}", batch.unwrap());
 }
@@ -139,14 +150,17 @@ while let Some(batch) = reader.next() {
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `adbc`           | Core ADBC traits (`Driver`, `Database`, `Connection`, `Statement`), error types, Arrow schemas, and compile-time SQL safety (`TrustedSql`)     |
 | `adbc-sqlite`    | SQLite driver (bundled via rusqlite); SQL queries, DML, bulk ingest, and all catalog metadata methods                                           |
-| `adbc-postgres`  | PostgreSQL driver (via `postgres` crate); full transaction control, isolation levels, and catalog metadata                                      |
-| `adbc-mysql`     | MySQL driver (via `mysql` crate); full transaction control, isolation levels, read-only mode, and catalog metadata                              |
+| `adbc-postgres`  | PostgreSQL driver (via `tokio-postgres`); full transaction control, isolation levels, and catalog metadata                                       |
+| `adbc-mysql`     | MySQL driver (via `mysql_async`); full transaction control, isolation levels, read-only mode, and catalog metadata                               |
 | `adbc-flightsql` | FlightSQL driver (via tonic/arrow-flight); supports plaintext and TLS, basic-auth, and server-side transactions                                |
 
 ## Further Reading
 
 - [Architecture](architecture.md) -- trait hierarchy, generics design, and per-crate internals
+- [Design: Async-First Traits](design-async.md) -- design record for the sync-to-async migration
 - [Development](development.md) -- building, running tests, and how to add a new driver
 - [Feature Matrix](feature-matrix.md) -- driver feature and test coverage status
+- [Publish Checklist](publish-checklist.md) -- pre-publish checklist for crates.io
+- [Audit Findings](audit-findings.md) -- code audit findings and status
 - [ADBC specification](https://arrow.apache.org/adbc/current/format/specification.html)
 - [Arrow Rust crates](https://github.com/apache/arrow-rs)

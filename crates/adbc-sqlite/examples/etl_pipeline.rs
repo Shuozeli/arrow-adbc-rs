@@ -13,16 +13,14 @@
 
 use std::sync::Arc;
 
-use arrow_array::cast::AsArray;
-use arrow_array::{Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray};
-use arrow_schema::{DataType, Field, Schema};
-use arrow_select::concat::concat_batches;
-
 use adbc::{
     Connection, ConnectionOption, Database, DatabaseOption, Driver, IngestMode, Statement,
     StatementOption,
 };
 use adbc_sqlite::SqliteDriver;
+use arrow_array::cast::AsArray;
+use arrow_array::{Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 
 #[tokio::main]
 async fn main() -> adbc::Result<()> {
@@ -220,7 +218,5 @@ async fn main() -> adbc::Result<()> {
 }
 
 fn collect(reader: Box<dyn RecordBatchReader + Send>) -> RecordBatch {
-    let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
-    concat_batches(&schema, &batches).unwrap()
+    adbc::collect_reader(reader)
 }

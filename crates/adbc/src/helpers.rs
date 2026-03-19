@@ -85,6 +85,20 @@ impl arrow_array::RecordBatchReader for VecReader {
 }
 
 // ─────────────────────────────────────────────────────────────
+// collect_reader — drain a RecordBatchReader into one RecordBatch
+// ─────────────────────────────────────────────────────────────
+
+/// Collect all batches from a [`RecordBatchReader`](arrow_array::RecordBatchReader) into a
+/// single [`RecordBatch`].
+///
+/// Useful in tests and examples. Panics if any batch fails or concatenation fails.
+pub fn collect_reader(reader: Box<dyn arrow_array::RecordBatchReader + Send>) -> RecordBatch {
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    arrow_select::concat::concat_batches(&schema, &batches).unwrap()
+}
+
+// ─────────────────────────────────────────────────────────────
 // require_string — extract a String from OptionValue
 // ─────────────────────────────────────────────────────────────
 

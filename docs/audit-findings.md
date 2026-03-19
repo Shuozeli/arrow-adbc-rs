@@ -142,7 +142,7 @@ Near-identical catalog implementations (`get_info_batch`, `get_table_types_batch
 |---------|--------|--------|
 | Bulk ingest | FlightSQL | `not_impl` error |
 | `execute_update` on prepared stmt | FlightSQL | `not_impl` error |
-| `get_table_schema` | FlightSQL | Missing entirely |
+| `get_table_schema` | FlightSQL | Returns `NotImplemented` (stub, needs `arrow-ipc`) |
 | Isolation level | FlightSQL | Not implemented |
 | Read-only mode | FlightSQL | Not implemented |
 | `prepare()` | MySQL | No-op |

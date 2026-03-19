@@ -1,5 +1,7 @@
 # Driver Feature Matrix
 
+> Last updated: 2026-03-19
+
 This document tracks feature implementation status and test coverage across all ADBC drivers.
 Update this file when a new feature is implemented or a gap is resolved.
 
@@ -14,20 +16,21 @@ Update this file when a new feature is implemented or a gap is resolved.
 | `Database::new_connection`             |          Y          |    Y    |    Y    |        Y         |
 | `Connection::AutoCommit`               |          Y          |    Y    |    Y    |        Y         |
 | `Connection::IsolationLevel`           | Serializable only    | Y full  | Y full  |    N not impl    |
-| `Connection::ReadOnly`                 |          N          |    Y    |    Y    |        N         |
+| `Connection::ReadOnly`                 |          N          |    Y    |    Y    |    N not impl    |
 | `Connection::commit / rollback`        |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_table_types`          |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_info`                 |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_objects` (all depths) |          Y          |    Y    |    Y    |        Y         |
 | `Connection::get_table_schema`         |          Y          |    Y    |    Y    |        Y         |
 | `Statement::execute` (SELECT)          |          Y          |    Y    |    Y    |        Y         |
-| `Statement::execute_update` (DML/DDL)  |          Y          |    Y    |    Y    | Partial: plain SQL only |
-| `Statement::prepare`                   |          Y          |    Y    | Partial: no-op |  Y server-side   |
+| `Statement::execute_update` (DML/DDL)  |          Y          |    Y    |    Y    |        Y         |
+| `Statement::prepare`                   |          Y          |    Y    |  Y server-side  |  Y server-side   |
 | `Statement::bind` (RecordBatch)        |          Y          |    Y    |    Y    |        Y         |
 | `Statement::bind_stream`               |          Y          |    Y    |    Y    |        Y         |
 | `IngestMode::Create`                   |          Y          |    Y    |    Y    |    N not impl    |
 | `IngestMode::Replace`                  |          Y          |    Y    |    Y    |    N not impl    |
 | `IngestMode::Append`                   |          Y          |    Y    |    Y    |    N not impl    |
+| `IngestMode::CreateAppend`             |          Y          |    Y    |    Y    |    N not impl    |
 | NULL value roundtrip (ingest + read)   |          Y          |    Y    |    Y    |        n/a        |
 
 **Legend:** Y = Implemented, Partial = Partial support, N = Not implemented
@@ -35,20 +38,6 @@ Update this file when a new feature is implemented or a gap is resolved.
 ---
 
 ## Known Gaps
-
-### `Statement::prepare` -- MySQL
-
-MySQL's `prepare()` is currently a no-op that always returns `Ok(())`. It does **not** perform
-real prepared-statement compilation on the server.
-
-**Resolution path:** Implement using the `mysql` crate's prepared-statement API (`mysql::Statement`).
-
-### `Statement::execute_update` -- FlightSQL (prepared statements only)
-
-`execute_update()` works for plain SQL (DDL/DML), but returns `NotImplemented` when the statement
-has been previously `prepare()`-d.
-
-**Resolution path:** Use the `UpdateStatement` FlightSQL RPC for DML after `CreatePreparedStatement`.
 
 ### Bulk Ingest -- FlightSQL
 
@@ -63,12 +52,13 @@ SQLite accepts `IsolationLevel::Serializable` and `IsolationLevel::Default` sile
 (SQLite is serializable-only), but rejects all other levels with `NotImplemented`.
 This is intentionally correct behavior.
 
-### `Connection::ReadOnly` -- SQLite, Postgres, FlightSQL
+### `Connection::ReadOnly` -- SQLite, FlightSQL
 
-Not implemented. MySQL **is** implemented via `SET TRANSACTION READ ONLY / READ WRITE`.
+SQLite and FlightSQL do not implement ReadOnly.
+PostgreSQL **is** implemented via `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY / READ WRITE`.
+MySQL **is** implemented via `SET TRANSACTION READ ONLY / READ WRITE`.
 
 **Resolution path:** SQLite: open with `SQLITE_OPEN_READONLY`.
-Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`.
 
 ---
 
@@ -80,8 +70,8 @@ Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`.
 | `driver_bad_option`                  |   Y    |    Y    |     Y     |     --     |
 | `db_new_connection`                  |   Y    |    Y    |     Y     |    Y     |
 | `conn_autocommit_toggle`             |   Y    |    Y    |     Y     |     --     |
-| `conn_commit_in_autocommit_fails`    |   Y    |    Y    |     Y     |     --     |
-| `conn_rollback_in_autocommit_fails`  |   Y    |    Y    |     Y     |     --     |
+| `conn_commit_in_autocommit_fails`    |   Y    |    Y    |    Y     |     --     |
+| `conn_rollback_in_autocommit_fails`  |   Y    |    Y    |    Y     |     --     |
 | `conn_transaction_isolation`         |   Y    |    Y    |     Y     |     --     |
 | `conn_unknown_option`                |   Y    |    Y    |     Y     |     --     |
 | `conn_get_table_types`               |   Y    |    Y    |     Y     |    Y     |
@@ -110,7 +100,6 @@ Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`.
 | `ingest_bind_stream`                 |   Y    |    Y    |     Y     |     --     |
 | `ingest_large_batch`                 |   Y    |    Y    |     Y     |     --     |
 | `ingest_not_implemented` (FlightSQL) |   --    |    --     |     --      |    Y     |
-| `execute_update_prepared_not_impl`   |   --    |    --     |     --      |    Y     |
-| **Total tests**                      | **34** |  **32**  |   **28**   |  **13**   |
+| **Total tests**                      | **34** |  **32**  |   **28**   |  **10**   |
 
 **Legend:** Y = Has test, -- = Not applicable or not yet added

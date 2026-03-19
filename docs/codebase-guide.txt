@@ -1,0 +1,256 @@
+arrow-adbc-rs Codebase Guide
+=============================
+Generated from source code analysis. Not derived from any .md files.
+
+1. PROJECT IDENTITY
+-------------------
+A clean-room Rust implementation of ADBC (Arrow Database Connectivity) v1.1.0.
+No C FFI, no dynamic loading, no dependency on apache/arrow-adbc.
+Version: 0.2.0, Rust edition 2021, MSRV 1.85.
+License: MIT OR Apache-2.0.
+Repo: github.com/Shuozeli/arrow-adbc-rs
+
+2. WORKSPACE LAYOUT
+--------------------
+Cargo workspace with 5 crates:
+
+  crates/adbc/             Core traits and types (no driver logic)
+  crates/adbc-sqlite/      SQLite driver (via rusqlite, bundled)
+  crates/adbc-postgres/    PostgreSQL driver (via tokio-postgres)
+  crates/adbc-mysql/       MySQL driver (via mysql_async)
+  crates/adbc-flightsql/   Arrow FlightSQL driver (via arrow-flight + tonic gRPC)
+
+Each driver crate has:
+  src/lib.rs       Driver/Database/Connection/Statement impls
+  src/convert.rs   Arrow <-> DB type conversions + bulk ingest (not FlightSQL)
+  src/catalog.rs   Metadata methods (get_info, get_objects, get_table_schema, get_table_types)
+  tests/integration.rs   Integration tests
+
+3. CORE ARCHITECTURE (crates/adbc/)
+-------------------------------------
+Object model follows ADBC spec:
+
+  Driver -> Database -> Connection -> Statement
+
+All traits are async-first with Send + Sync bounds.
+Traits use RPITIT (return-position impl Trait in trait), not boxed futures.
+
+Modules:
+  driver.rs   - 4 core traits: Driver, Database, Connection, Statement
+              - Enums: OptionValue, DatabaseOption, ConnectionOption, StatementOption,
+                IngestMode, IsolationLevel, ObjectDepth, InfoCode
+  error.rs    - Error struct with Status code enum (13 variants), vendor_code, sqlstate
+              - Result<T> alias
+  schema.rs   - Static Arrow schemas for metadata results (LazyLock<SchemaRef>):
+                TABLE_TYPES_SCHEMA, GET_INFO_SCHEMA, GET_OBJECTS_SCHEMA
+                Plus nested types: COLUMN_SCHEMA, TABLE_SCHEMA, DB_SCHEMA_SCHEMA,
+                CONSTRAINT_SCHEMA, USAGE_SCHEMA
+  sql.rs      - Compile-time SQL injection prevention system:
+                SqlSafe sealed trait, TrustedSql wrapper, trusted_sql! macro
+                Components: QuotedIdent (ANSI/MySQL escaping), SqlLiteral,
+                SqlJoined, SqlColumnDef, SqlPlaceholders (anonymous/?/$/indexed)
+  dyn_api.rs  - Object-safe wrappers: DynConnection, DynStatement
+                Uses BoxFuture for dyn compatibility
+                Blanket impls: any Connection is a DynConnection, etc.
+  helpers.rs  - OneBatch (single-batch RecordBatchReader)
+              - VecReader (Vec<RecordBatch> -> RecordBatchReader)
+              - require_string (extract String from OptionValue)
+
+4. DRIVER PATTERNS
+-------------------
+All drivers follow the same structural pattern:
+
+a) Synchronization:
+   - SQLite: Arc<Mutex<SqliteInner>> + tokio::task::spawn_blocking
+     (rusqlite is sync, bridge to async via spawn_blocking)
+   - PostgreSQL: Arc<tokio_postgres::Client> (natively async, client handles pipelining)
+     + tokio::sync::Mutex for transaction state only
+   - MySQL: Arc<tokio::sync::Mutex<MysqlInner>> (mysql_async is async but needs &mut)
+   - FlightSQL: tokio::sync::Mutex<FlightSqlInner> (gRPC client needs &mut for some ops)
+
+b) Statement state machine (Mode enum):
+   Idle -> Sql(String) -> Prepared(String) -> (execute)
+   Idle -> Ingest{table, mode} -> (execute_update with bound data)
+
+c) Transaction management:
+   - autocommit flag tracked in driver state
+   - When autocommit disabled:
+     SQLite: BEGIN DEFERRED; PostgreSQL: BEGIN; MySQL: SET autocommit=0 + START TRANSACTION
+   - commit/rollback: COMMIT/ROLLBACK then re-open transaction
+     (SQLite: BEGIN DEFERRED; PostgreSQL: BEGIN; MySQL: START TRANSACTION)
+   - Error if commit/rollback called while autocommit is on
+
+d) Bulk ingest flow:
+   1. Set TargetTable option
+   2. Optionally set IngestMode (Create/Append/Replace/CreateAppend)
+   3. bind() or bind_stream() with RecordBatch data
+   4. execute_update() -> DDL if needed, then INSERT/COPY rows
+   - SQLite: parameterized INSERT with indexed placeholders (?1, ?2, ...)
+   - PostgreSQL: COPY protocol (text format, tab-separated)
+   - MySQL: parameterized INSERT with anonymous placeholders (?, ?, ...)
+   - FlightSQL: not supported (returns NotImplemented)
+
+e) SQL safety:
+   All drivers use trusted_sql! macro for DDL generation.
+   QuotedIdent::ansi() for SQLite/PostgreSQL, QuotedIdent::mysql() for MySQL.
+   User-provided table/column names are always quoted, never interpolated raw.
+
+5. TYPE MAPPING
+----------------
+SQLite -> Arrow:
+  INTEGER -> Int64, REAL -> Float64, TEXT -> Utf8, BLOB -> Binary, NULL -> Null
+  Schema inference: scans first non-NULL value per column
+
+PostgreSQL -> Arrow:
+  BOOL -> Boolean, INT2 -> Int16, INT4/OID -> Int32, INT8 -> Int64
+  FLOAT4 -> Float32, FLOAT8 -> Float64, NUMERIC -> Utf8, BYTEA -> Binary
+  Everything else -> Utf8
+
+Arrow -> PostgreSQL (ingest):
+  Boolean -> BOOLEAN, Int8/Int16 -> SMALLINT, Int32 -> INTEGER
+  Int64/UInt32/UInt64 -> BIGINT, Float32 -> REAL, Float64 -> DOUBLE PRECISION
+  Binary -> BYTEA, else -> TEXT
+
+MySQL -> Arrow:
+  Respects UNSIGNED flag for all integer types
+  TINY -> Int8/UInt8, SHORT -> Int16/UInt16, LONG -> Int32/UInt32
+  LONGLONG -> Int64/UInt64, FLOAT -> Float32, DOUBLE/DECIMAL -> Float64
+  BIT -> Boolean, BLOB (non-binary) -> Utf8, BLOB (binary) -> Binary
+
+6. METADATA IMPLEMENTATION
+----------------------------
+get_info: Returns dense union array with 6 type variants:
+  string (type_id=0), bool (1), int64 (2), int32_bitmask (3),
+  string_list (4), int32_to_int32_list_map (5)
+
+  SQLite: all 9 InfoCodes supported, VendorVersion from rusqlite::version()
+  PostgreSQL: 6 InfoCodes, VendorVersion from current_setting('server_version')
+  MySQL: 6 InfoCodes, VendorVersion from SELECT VERSION()
+  FlightSQL: delegates to GetSqlInfo RPC
+
+get_objects: Hierarchical catalog structure:
+  catalog_name (nullable) -> catalog_db_schemas (list) ->
+    db_schema_name -> db_schema_tables (list) ->
+      table_name, table_type, table_columns (list), table_constraints (list)
+
+  ObjectDepth controls how deep to go:
+    Catalogs, Schemas, Tables, Columns, All
+
+  SQLite: queries sqlite_master, single catalog (NULL), single schema ("main")
+  PostgreSQL: queries information_schema.tables, single catalog (NULL)
+  MySQL: queries information_schema.TABLES, uses SELECT DATABASE()
+  FlightSQL: delegates to GetTables RPC with CommandGetTables
+
+get_table_schema:
+  SQLite: PRAGMA table_info(quoted_name)
+  PostgreSQL: SELECT from information_schema.columns (parameterized)
+  MySQL: SELECT from information_schema.COLUMNS (parameterized)
+  FlightSQL: NOT IMPLEMENTED (needs arrow-ipc for schema decoding)
+
+get_table_types: Static arrays
+  SQLite: ["table", "view"]
+  PostgreSQL: ["BASE TABLE", "VIEW", "FOREIGN", "MATERIALIZED VIEW"]
+  MySQL: ["BASE TABLE", "VIEW", "SYSTEM VIEW"]
+  FlightSQL: delegates to GetTableTypes RPC
+
+7. FLIGHTSQL SPECIFICS
+-----------------------
+Transport: gRPC via tonic. URI schemes: grpc:// (plaintext), grpc+tls:// (TLS).
+Authentication: username/password handshake.
+Transaction support: begin_transaction/end_transaction RPCs.
+
+RecordBatch compatibility hack: arrow-flight may re-export a different semver
+of arrow-array. The driver uses an unsafe pointer cast (Box::into_raw/from_raw)
+to reinterpret between the two RecordBatch types, with a runtime size assertion
+(assert_recordbatch_layout_compatible).
+
+Known gaps:
+  - get_table_schema: NotImplemented (needs arrow-ipc)
+  - Bulk ingest: NotImplemented
+  - execute_update on prepared statements: NotImplemented
+  - Bound parameters: not passed through to execute
+
+8. BOUND PARAMETERS
+---------------------
+All 3 SQL drivers support parameterized queries via bind():
+  1. Caller binds a RecordBatch where each column = one parameter
+  2. First row of first batch is extracted as parameter values
+  3. Parameters passed to the underlying driver's prepared statement
+
+Parameter extraction functions:
+  SQLite: batch_row_to_params -> Vec<rusqlite::types::Value>
+  PostgreSQL: batch_row_to_params -> Vec<Box<dyn ToSql + Sync + Send>>
+  MySQL: batch_row_to_params -> Vec<mysql_async::Value>
+
+9. CONNECTION LIFECYCLE
+------------------------
+SQLiteConnection: Drop impl rolls back any open transaction
+PostgresConnection: No explicit Drop (tokio-postgres connection task runs independently)
+MysqlConnection: Connection returned to pool when dropped
+FlightSqlConnection: Mutex-guarded client, no special cleanup
+
+10. TESTING STRATEGY
+---------------------
+SQLite tests: Run in-memory, no external deps. All tests are active.
+PostgreSQL tests: Require ADBC_POSTGRES_URI env var. #[ignore] by default.
+MySQL tests: Require ADBC_MYSQL_URI env var. #[ignore] by default.
+FlightSQL tests: Require ADBC_FLIGHTSQL_URI env var. #[ignore] by default.
+
+CI: GitHub Actions with 5 jobs:
+  - check: cargo check + clippy (exclude adbc-duckdb -- stale, no such crate in workspace)
+  - fmt: cargo fmt --check
+  - test-offline: cargo test --workspace (only SQLite tests run)
+  - test-postgres: service container postgres:16, cargo test -p adbc-postgres --include-ignored
+  - test-mysql: service container mysql:8, cargo test -p adbc-mysql --include-ignored
+  - doc: cargo doc --workspace --no-deps
+
+Pre-commit hooks: cargo fmt, clippy, check, test (pre-push), credential leak check.
+
+Test coverage per driver:
+  - Driver creation, bad options
+  - Connection lifecycle, autocommit toggle, commit/rollback errors
+  - Metadata: get_table_types, get_info (all/filtered), get_objects (multiple depths),
+    get_table_schema (existing/missing)
+  - Statement: execute (no query error), SELECT, multi-row, prepared, reuse
+  - Bulk ingest: roundtrip, Create already exists, Replace, Append, bind_stream,
+    large batch (1000 rows)
+  - NULL roundtrip: NULL values survive write->read
+  - Transaction isolation: changes visible within txn, gone after rollback
+
+11. DEPENDENCY MAP
+-------------------
+Core (adbc): arrow-array, arrow-schema
+SQLite (adbc-sqlite): adbc, arrow-*, rusqlite (bundled), tokio
+PostgreSQL (adbc-postgres): adbc, arrow-*, tokio-postgres, bytes, futures-util, tokio
+  Optional TLS: tokio-postgres-rustls, rustls, rustls-native-certs
+MySQL (adbc-mysql): adbc, arrow-*, mysql_async, tokio
+FlightSQL (adbc-flightsql): adbc, arrow-array, arrow-flight, arrow-schema,
+  bytes, tokio-stream, tokio, tonic
+  Optional TLS: tonic/tls feature
+
+Arrow version range: >=53, <59 (wide compat window)
+
+12. SQL INJECTION PREVENTION
+------------------------------
+The sql.rs module implements a type-level defense:
+  - SqlSafe: sealed marker trait (cannot be implemented outside the crate)
+  - trusted_sql! macro: compile-time format string that only accepts SqlSafe values
+  - QuotedIdent: properly escapes identifiers (double-quote for ANSI, backtick for MySQL)
+  - SqlLiteral: only accepts &'static str (known at compile time)
+  - TrustedSql::from_raw: sealed constructor (requires __private::Seal token)
+
+This means arbitrary String/&str CANNOT be interpolated into SQL via the macro.
+The compile_fail doctest proves this: attempting to format a user String fails compilation.
+
+13. ERROR HANDLING
+-------------------
+Every driver function returns adbc::Result<T> = Result<T, adbc::Error>.
+Error has: message (String), status (Status enum), vendor_code (Option<i32>),
+sqlstate (Option<[u8; 5]>).
+
+Convenience constructors: Error::not_impl(), invalid_arg(), invalid_state(),
+not_found(), internal(), io(), already_exists().
+
+Status codes map to ADBC spec: Ok, Unknown, NotImplemented, NotFound,
+AlreadyExists, InvalidArguments, InvalidState, Io, Internal,
+Unauthenticated, Unauthorized, Cancelled, Timeout.

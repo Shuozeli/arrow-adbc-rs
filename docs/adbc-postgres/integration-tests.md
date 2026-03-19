@@ -25,10 +25,11 @@ ADBC_POSTGRES_URI="host=localhost port=5432 user=adbc_test password=adbc_test db
 
 | Test                              | Description                                                 |
 | --------------------------------- | ----------------------------------------------------------- |
-| `conn_autocommit_toggle`          | Disable -> commit -> rollback -> re-enable autocommit       |
-| `conn_commit_in_autocommit_fails` | `commit()` in autocommit mode -> `InvalidState`             |
-| `conn_transaction_isolation`      | Table created inside tx; row visible; rollback discards DML |
-| `conn_unknown_option`             | Unknown connection option -> non-Ok error                   |
+| `conn_autocommit_toggle`            | Disable -> commit -> rollback -> re-enable autocommit        |
+| `conn_commit_in_autocommit_fails`  | `commit()` in autocommit mode -> `InvalidState`              |
+| `conn_rollback_in_autocommit_fails`| `rollback()` in autocommit mode -> `InvalidState`            |
+| `conn_transaction_isolation`       | Table created inside tx; row visible; rollback discards DML  |
+| `conn_unknown_option`              | Unknown connection option -> non-Ok error                    |
 
 ## Metadata
 
@@ -48,12 +49,14 @@ ADBC_POSTGRES_URI="host=localhost port=5432 user=adbc_test password=adbc_test db
 
 | Test                         | Description                                            |
 | ---------------------------- | ------------------------------------------------------ |
+| `stmt_execute_no_query`      | `execute()` without SQL -> `InvalidState`              |
 | `stmt_execute_select`        | `SELECT 42::BIGINT` -> 1 row                           |
 | `stmt_execute_select_values` | Verifies actual integer and string cell values         |
 | `stmt_execute_multi_row`     | `generate_series(1,5)` -> 5 rows                       |
 | `stmt_prepare_and_execute`   | `prepare()` then `execute()` returns correct result    |
 | `stmt_reuse_with_new_query`  | Reuse same statement object with a different SQL query |
 | `stmt_execute_update`        | `CREATE TABLE` + `INSERT`; row count == 1              |
+| `stmt_bad_option`            | Unknown statement option -> `InvalidArguments`         |
 
 ## NULL Values
 
@@ -65,8 +68,9 @@ ADBC_POSTGRES_URI="host=localhost port=5432 user=adbc_test password=adbc_test db
 
 | Test                 | Description                                                      |
 | -------------------- | ---------------------------------------------------------------- |
-| `ingest_roundtrip`   | Create mode; verifies row count and column names                 |
-| `ingest_replace`     | Replace mode on existing table succeeds                          |
+| `ingest_roundtrip`             | Create mode; verifies row count and column names                 |
+| `ingest_create_already_exists` | Create mode on existing table -> `AlreadyExists`                 |
+| `ingest_replace`               | Replace mode on existing table succeeds                          |
 | `ingest_append`      | Append mode doubles the row count without truncating             |
 | `ingest_bind_stream` | `bind_stream()` ingests 3 rows via streaming `RecordBatchReader` |
 | `ingest_large_batch` | Ingests 1 000 rows; verifies count via `SELECT count(*)`        |

@@ -392,18 +392,19 @@ pub fn get_objects_batch(
     .map_err(|e| Error::internal(e.to_string()))
 }
 
-#[allow(clippy::type_complexity)]
+type TableArrays = (
+    Arc<dyn Array>,
+    Arc<dyn Array>,
+    Arc<dyn Array>,
+    Arc<dyn Array>,
+);
+
 fn build_table_arrays(
     conn: &Connection,
     tables: &[(String, String)],
     include_tables: bool,
     include_columns: bool,
-) -> Result<(
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-)> {
+) -> Result<TableArrays> {
     if !include_tables || tables.is_empty() {
         return Ok((
             Arc::new(StringArray::from(Vec::<&str>::new())),

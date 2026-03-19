@@ -14,3 +14,4 @@ version.workspace = true
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+arrow-select.workspace = true

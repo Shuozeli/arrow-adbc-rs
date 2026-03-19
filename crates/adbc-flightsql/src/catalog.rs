@@ -1,8 +1,11 @@
 //! FlightSQL metadata RPC helpers and query execution.
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, BinaryArray, RecordBatch};
 use arrow_flight::{
-    sql::{client::FlightSqlServiceClient, CommandGetTables, SqlInfo},
+    sql::{
+        client::{FlightSqlServiceClient, PreparedStatement},
+        CommandGetTables, SqlInfo,
+    },
     FlightInfo,
 };
 use arrow_schema::Schema;
@@ -65,6 +68,37 @@ async fn collect_info(
     Ok(all)
 }
 
+/// Public(crate) wrapper around `collect_info` for use by `lib.rs`.
+pub(crate) async fn collect_info_pub(
+    client: &mut FlightSqlServiceClient<Channel>,
+    info: FlightInfo,
+) -> Result<Vec<RecordBatch>> {
+    collect_info(client, info).await
+}
+
+/// Bind a parameter `RecordBatch` to a prepared statement.
+///
+/// `PreparedStatement::set_parameters` expects the `arrow_array::RecordBatch`
+/// type from the version of `arrow-array` that `arrow-flight` was compiled
+/// against (55.x), while our crate uses 58.x. The two types have identical
+/// memory layout, so we reinterpret the pointer — the same technique used
+/// in `collect_info` for the reverse direction.
+pub(crate) fn set_prepared_parameters(
+    prepared: &mut PreparedStatement<Channel>,
+    batch: &RecordBatch,
+) -> Result<()> {
+    // SAFETY: Our 58.x `RecordBatch` and arrow-flight's 55.x `RecordBatch`
+    // are the same struct with the same fields and alignment. The
+    // `Box::into_raw` / `Box::from_raw` round-trip reinterprets the heap
+    // allocation without copying. No aliasing occurs because the original
+    // `Box` is consumed before the new one is created.
+    let flight_batch = unsafe {
+        let ptr = Box::into_raw(Box::new(batch.clone())) as *mut ();
+        *Box::from_raw(ptr as *mut _)
+    };
+    prepared.set_parameters(flight_batch).map_err(arrow_err)
+}
+
 // ─────────────────────────────────────────────────────────────
 // Query execution
 // ─────────────────────────────────────────────────────────────
@@ -104,25 +138,61 @@ pub async fn execute_update(
 // Metadata
 // ─────────────────────────────────────────────────────────────
 
+/// Decode an IPC Schema message (as stored in the `table_schema` column of a
+/// `GetTables` response) into an Arrow [`Schema`].
+fn decode_ipc_schema(buf: &[u8]) -> Result<Schema> {
+    arrow_ipc::convert::try_schema_from_ipc_buffer(buf)
+        .map_err(|e| Error::internal(format!("Failed to decode IPC schema: {e}")))
+}
+
 /// Retrieve the Arrow schema for a specific table.
 ///
-/// Not yet implemented: requires an `arrow-ipc` dependency to decode the
-/// IPC-serialized schema from the `GetTables` response.
+/// Uses the FlightSQL `GetTables` RPC with `include_schema = true` to obtain
+/// the IPC-serialized schema stored in the `table_schema` column, then decodes
+/// it with `arrow-ipc`.
 pub async fn get_table_schema(
-    _client: &mut FlightSqlServiceClient<Channel>,
-    _catalog: Option<&str>,
-    _db_schema: Option<&str>,
+    client: &mut FlightSqlServiceClient<Channel>,
+    catalog: Option<&str>,
+    db_schema: Option<&str>,
     name: &str,
 ) -> Result<Schema> {
-    // Full implementation requires arrow-ipc to decode the IPC-serialized schema
-    // from the GetTables response. Stub added here as a known gap.
-    // TODO: add arrow-ipc dep and decode the `table_schema` column properly.
+    let request = CommandGetTables {
+        catalog: catalog.map(str::to_owned),
+        db_schema_filter_pattern: db_schema.map(str::to_owned),
+        table_name_filter_pattern: Some(name.to_owned()),
+        table_types: vec![],
+        include_schema: true,
+    };
+
+    let info = client.get_tables(request).await.map_err(arrow_err)?;
+    let batches = collect_info(client, info).await?;
+
+    // The GetTables response schema:
+    //   0: catalog_name       (Utf8)
+    //   1: db_schema_name     (Utf8)
+    //   2: table_name         (Utf8)
+    //   3: table_type         (Utf8)
+    //   4: table_schema       (Binary) — IPC Schema message bytes (only when include_schema=true)
+    for batch in &batches {
+        if batch.num_columns() < 5 || batch.num_rows() == 0 {
+            continue;
+        }
+        let schema_col = batch.column(4);
+        let binary_arr = schema_col
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| Error::internal("table_schema column is not a Binary array"))?;
+        for i in 0..binary_arr.len() {
+            if binary_arr.is_null(i) {
+                continue;
+            }
+            return decode_ipc_schema(binary_arr.value(i));
+        }
+    }
+
     Err(Error::new(
-        format!(
-            "get_table_schema('{}') is not yet implemented for FlightSQL",
-            name
-        ),
-        adbc::Status::NotImplemented,
+        format!("Table '{name}' not found"),
+        adbc::Status::NotFound,
     ))
 }
 

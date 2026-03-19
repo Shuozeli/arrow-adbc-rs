@@ -1,5 +1,7 @@
 # Architecture
 
+> Last updated: 2026-03-19
+
 This document explains the internal design of the `arrow-adbc-rs` workspace: the trait
 hierarchy, generics strategy, and per-crate implementation notes.
 
@@ -17,27 +19,30 @@ Driver
 Each trait is parameterised over the type it produces:
 
 ```rust
-pub trait Driver {
+pub trait Driver: Send + Sync {
     type DatabaseType: Database;
-    fn new_database(&mut self) -> Result<Self::DatabaseType>;
-    fn new_database_with_opts(...) -> Result<Self::DatabaseType>;
+    async fn new_database(&self) -> Result<Self::DatabaseType>;
+    async fn new_database_with_opts(...) -> Result<Self::DatabaseType>;
 }
 
-pub trait Database {
+pub trait Database: Send + Sync {
     type ConnectionType: Connection;
-    fn new_connection(&self) -> Result<Self::ConnectionType>;
-    fn new_connection_with_opts(...) -> Result<Self::ConnectionType>;
+    async fn new_connection(&self) -> Result<Self::ConnectionType>;
+    async fn new_connection_with_opts(...) -> Result<Self::ConnectionType>;
 }
 
-pub trait Connection {
+pub trait Connection: Send + Sync {
     type StatementType: Statement;
-    // SQL execution, transaction management, catalog metadata …
+    // async fn: SQL execution, transaction management, catalog metadata …
 }
 
-pub trait Statement {
-    // set_sql_query, prepare, execute, execute_update, bind …
+pub trait Statement: Send + Sync {
+    // async fn: set_sql_query, prepare, execute, execute_update, bind …
 }
 ```
+
+All traits are **async-first** with `Send + Sync` bounds. Rust 1.85+ supports
+native `async fn` in traits (RPITIT) -- no `async-trait` crate needed.
 
 Because every associated type is concrete, the compiler can **monomorphise the entire
 chain** — no `Box<dyn …>`, no vtable, no heap allocation in the object creation path.
@@ -48,7 +53,7 @@ lifetime must outlive the statement.
 
 ### `error.rs`
 
-Defines `Status` (14 variants matching the ADBC spec) and `Error` (message + status +
+Defines `Status` (13 variants matching the ADBC spec) and `Error` (message + status +
 optional vendor code + optional 5-char SQLSTATE). The `Result<T>` alias is
 `std::result::Result<T, adbc::Error>`.
 
@@ -129,12 +134,14 @@ let sql = trusted_sql!("SELECT * FROM {}", table); // compile error
 
 ### Connection ownership model
 
-`SqliteConnection` wraps `rusqlite::Connection` in `Arc<Mutex<rusqlite::Connection>>`.
-This is necessary because `Connection` metadata methods (`get_info`, `get_objects`, …)
-take `&self`, but locking a `Mutex` requires a shared reference. `SqliteStatement` clones
-the `Arc` so statements and connections can coexist without lifetime issues.
+`SqliteConnection` wraps a `SqliteInner` struct (containing `rusqlite::Connection`,
+`autocommit`, and `in_transaction` flags) in `Arc<Mutex<SqliteInner>>`. All operations
+go through a `with_conn()` helper that clones the `Arc` and calls
+`tokio::task::spawn_blocking` to bridge the sync `rusqlite` API to async. `std::sync::Mutex`
+is used (not `tokio::sync::Mutex`) because the lock is held only inside the blocking closure.
+`SqliteStatement` clones the `Arc` so statements and connections can coexist.
 
-All connection types implement `Drop` to issue `ROLLBACK` if an open transaction
+`SqliteConnection` implements `Drop` to issue `ROLLBACK` if an open transaction
 exists when the connection is dropped, preventing leaked transactions.
 
 ### Transaction management
@@ -182,10 +189,15 @@ Arrow `RecordBatch`es matching the schemas from `adbc::schema`.
 
 ### Connection ownership model
 
-Same `Arc<Mutex<…>>` pattern as SQLite. `PostgresConnection` wraps `postgres::Client`.
+`PostgresConnection` wraps `tokio_postgres::Client` in `Arc<tokio_postgres::Client>`.
+The client is natively async and `Send + Sync`, handling request pipelining internally --
+no `Mutex` needed for queries. Transaction state (`autocommit`, `in_transaction`) is tracked
+separately in `tokio::sync::Mutex<PgState>`. The `Database::connect()` method spawns the
+`tokio_postgres::Connection` future as a background tokio task.
+
 Username and password values are escaped for safe embedding in libpq connection strings
 (single-quote and backslash escaping). TLS is available behind the `tls` Cargo feature
-(uses `postgres-native-tls`).
+(uses `tokio-postgres-rustls` with `rustls`).
 
 ### Transaction management
 
@@ -210,14 +222,17 @@ wrapped in an explicit `BEGIN`/`COMMIT` transaction with `ROLLBACK` on error.
 
 ### Connection ownership model
 
-Same `Arc<Mutex<…>>` pattern. `MysqlConnection` wraps `mysql::PooledConn`.
+`MysqlConnection` wraps `mysql_async::Conn` in `Arc<tokio::sync::Mutex<MysqlInner>>`.
+`mysql_async::Conn` requires `&mut self` for queries, so `tokio::sync::Mutex` provides
+interior mutability. `MysqlDatabase` uses `tokio::sync::OnceCell<mysql_async::Pool>` for
+lazy connection pool initialization.
 
 ### Transaction management
 
-| `autocommit`     | Behaviour                                                                            |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| `true` (default) | Each statement auto-commits                                                          |
-| `false`          | `SET autocommit=0` + `BEGIN`; `COMMIT`/`ROLLBACK` re-open a new `BEGIN` immediately |
+| `autocommit`     | Behaviour                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `true` (default) | Each statement auto-commits                                                                            |
+| `false`          | `SET autocommit=0` + `START TRANSACTION`; `COMMIT`/`ROLLBACK` re-open a new `START TRANSACTION` immediately |
 
 Supports isolation levels via `SET TRANSACTION ISOLATION LEVEL …` and read-only mode
 via `SET TRANSACTION READ ONLY / READ WRITE`.
@@ -233,30 +248,11 @@ server-side preparation -- see `docs/feature-matrix.md` for known gaps.
 
 ## `adbc-flightsql` Driver
 
-### Async → sync bridge
+### Transport and TLS
 
 TLS is available behind the `tls` Cargo feature. URIs with `grpc+tls://` are
 normalised to `https://` and use `tonic`'s native-roots TLS configuration.
-
-### Async -> sync bridge
-
-ADBC traits are synchronous. The FlightSQL driver bridges internally:
-
-```rust
-fn block<F: Future<Output = T>, T>(f: F) -> T {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| Handle::current().block_on(f))
-    } else {
-        Builder::new_current_thread().enable_all().build()?.block_on(f)
-    }
-}
-```
-
-This handles two cases:
-
-- **Inside a Tokio runtime** (e.g. an async `#[tokio::test]`): uses `block_in_place` to
-  avoid deadlocking the runtime.
-- **Outside a Tokio runtime**: builds a fresh single-threaded runtime per call.
+Plaintext `grpc://` URIs are normalised to `http://`.
 
 ### Connection and transactions
 
@@ -276,12 +272,12 @@ Wraps all FlightSQL metadata RPCs:
 
 | ADBC method        | FlightSQL RPC                                       |
 | ------------------ | --------------------------------------------------- |
-| `get_table_schema` | `GetSchema` (via `CommandGetTableTypes` descriptor) |
+| `get_table_schema` | **Not implemented** (requires `arrow-ipc` to decode IPC schema) |
 | `get_table_types`  | `GetFlightInfo(CommandGetTableTypes)` → `DoGet`     |
 | `get_info`         | `GetFlightInfo(CommandGetSqlInfo)` → `DoGet`        |
-| `get_objects`      | `GetFlightInfo(CommandGetObjects)` → `DoGet`        |
+| `get_objects`      | `GetFlightInfo(CommandGetTables)` → `DoGet`         |
 | `execute`          | `GetFlightInfo(CommandStatementQuery)` → `DoGet`    |
-| `execute_update`   | `DoPut(CommandStatementUpdate)`                     |
+| `execute_update`   | `ExecuteUpdate`                                     |
 | `prepare`          | `CreatePreparedStatement`                           |
 
 Results are collected into `Vec<RecordBatch>` and returned via the `VecReader` helper.

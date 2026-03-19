@@ -27,7 +27,7 @@
 mod catalog;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_flight::sql::client::FlightSqlServiceClient;
+use arrow_flight::sql::client::{FlightSqlServiceClient, PreparedStatement};
 use arrow_schema::Schema;
 use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
@@ -202,6 +202,7 @@ impl Connection for FlightSqlConnection {
             transaction_id: inner.transaction_id.clone(),
             mode: StmtMode::Idle,
             bound_data: None,
+            prepared_stmt: None,
         })
     }
 
@@ -337,9 +338,7 @@ enum StmtMode {
     #[default]
     Idle,
     Sql(String),
-    Prepared {
-        query: String,
-    },
+    Prepared,
     Ingest {
         table: String,
         mode: IngestMode,
@@ -352,6 +351,8 @@ pub struct FlightSqlStatement {
     transaction_id: Option<bytes::Bytes>,
     mode: StmtMode,
     bound_data: Option<Vec<RecordBatch>>,
+    /// Server-side prepared statement handle, set by [`Statement::prepare`].
+    prepared_stmt: Option<PreparedStatement<Channel>>,
 }
 
 impl Statement for FlightSqlStatement {
@@ -363,23 +364,39 @@ impl Statement for FlightSqlStatement {
     async fn prepare(&mut self) -> Result<()> {
         let sql = match &self.mode {
             StmtMode::Sql(s) => s.clone(),
-            StmtMode::Prepared { .. } => return Ok(()),
+            StmtMode::Prepared => return Ok(()),
             _ => return Err(Error::invalid_state("No SQL has been set")),
         };
         let mut client = self.client.clone();
         let txn = self.transaction_id.clone();
-        client.prepare(sql.clone(), txn).await.map_err(flight_err)?;
-        self.mode = StmtMode::Prepared { query: sql };
+        let handle = client.prepare(sql.clone(), txn).await.map_err(flight_err)?;
+        self.prepared_stmt = Some(handle);
+        self.mode = StmtMode::Prepared;
         Ok(())
     }
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            StmtMode::Sql(sql) | StmtMode::Prepared { query: sql, .. } => {
+            StmtMode::Sql(sql) => {
                 let sql = sql.clone();
                 let txn = self.transaction_id.clone();
                 let mut client = self.client.clone();
                 let batches = catalog::execute_query(&mut client, &sql, txn).await?;
+                Ok((Box::new(VecReader::new(batches)), None))
+            }
+            StmtMode::Prepared => {
+                let mut prepared = self.prepared_stmt.take().ok_or_else(|| {
+                    Error::invalid_state("Prepared statement handle missing; call prepare() first")
+                })?;
+                if let Some(batches) = &self.bound_data {
+                    if let Some(batch) = batches.first() {
+                        catalog::set_prepared_parameters(&mut prepared, batch)?;
+                    }
+                }
+                let info = prepared.execute().await.map_err(flight_err)?;
+                let mut client = self.client.clone();
+                let batches = catalog::collect_info_pub(&mut client, info).await?;
+                self.prepared_stmt = Some(prepared);
                 Ok((Box::new(VecReader::new(batches)), None))
             }
             StmtMode::Idle => Err(Error::invalid_state("No SQL has been set")),
@@ -395,13 +412,23 @@ impl Statement for FlightSqlStatement {
                 let mut client = self.client.clone();
                 catalog::execute_update(&mut client, &sql, txn).await
             }
+            StmtMode::Prepared => {
+                let mut prepared = self.prepared_stmt.take().ok_or_else(|| {
+                    Error::invalid_state("Prepared statement handle missing; call prepare() first")
+                })?;
+                if let Some(batches) = &self.bound_data {
+                    if let Some(batch) = batches.first() {
+                        catalog::set_prepared_parameters(&mut prepared, batch)?;
+                    }
+                }
+                let count = prepared.execute_update().await.map_err(flight_err)?;
+                self.prepared_stmt = Some(prepared);
+                Ok(count)
+            }
             StmtMode::Ingest { .. } => Err(Error::not_impl(
                 "Bulk ingest is not supported by the FlightSQL driver",
             )),
             StmtMode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            StmtMode::Prepared { .. } => Err(Error::not_impl(
-                "execute_update on a prepared statement is not yet supported",
-            )),
         }
     }
 

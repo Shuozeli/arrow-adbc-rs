@@ -352,6 +352,7 @@ enum Mode {
     #[default]
     Idle,
     Sql(String),
+    Prepared(String),
     Ingest {
         table: String,
         mode: IngestMode,
@@ -383,12 +384,20 @@ impl Statement for MysqlStatement {
 
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
-            Mode::Sql(_) => {
-                // MySQL prepare is a no-op at the driver level; the server-side
-                // prepare happens implicitly when exec is called. We accept
-                // the call for API compatibility.
+            Mode::Sql(sql) => {
+                let sql = sql.clone();
+                let mut inner = self.conn.lock().await;
+                // Actually prepare on the server to validate SQL
+                inner
+                    .conn
+                    .prep(&sql)
+                    .await
+                    .map_err(|e| Error::invalid_arg(e.to_string()))?;
+                drop(inner);
+                self.mode = Mode::Prepared(sql);
                 Ok(())
             }
+            Mode::Prepared(_) => Ok(()), // idempotent
             Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
             Mode::Ingest { .. } => Err(Error::invalid_state("Cannot prepare an ingest statement")),
         }
@@ -396,7 +405,7 @@ impl Statement for MysqlStatement {
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            Mode::Sql(sql) => {
+            Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;
@@ -425,7 +434,7 @@ impl Statement for MysqlStatement {
 
     async fn execute_update(&mut self) -> Result<i64> {
         match &self.mode {
-            Mode::Sql(sql) => {
+            Mode::Sql(sql) | Mode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;

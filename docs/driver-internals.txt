@@ -1,0 +1,241 @@
+Driver Implementation Internals
+================================
+Generated from source code analysis.
+
+This document covers the internal implementation details of each driver,
+focusing on patterns a contributor needs to understand.
+
+================================================================================
+1. CONCURRENCY MODEL
+================================================================================
+
+SQLITE
+------
+rusqlite::Connection is !Send. The driver wraps it in Arc<Mutex<SqliteInner>>
+and all operations go through with_conn(), which:
+  1. Clones the Arc
+  2. Calls tokio::task::spawn_blocking(move || { lock mutex; run closure })
+  3. Awaits the JoinHandle
+
+This pattern appears in both SqliteConnection and SqliteStatement, each having
+their own with_conn() method. Both share the same Arc<Mutex<SqliteInner>>.
+
+SqliteInner contains:
+  conn: rusqlite::Connection  -- the actual SQLite connection
+  autocommit: bool            -- mirrors our logical state
+  in_transaction: bool        -- whether BEGIN has been issued
+
+POSTGRESQL
+----------
+tokio_postgres::Client is Send + Sync and handles request pipelining internally.
+It's wrapped in Arc<tokio_postgres::Client> and shared between connection and
+all statements. No mutex needed for queries.
+
+Transaction state (autocommit, in_transaction) is tracked separately in
+Mutex<PgState>. The client.batch_execute() method is used for transaction
+SQL (BEGIN, COMMIT, ROLLBACK).
+
+Connection spawn pattern: The Database::connect() method calls config.connect()
+which returns (client, connection). The connection future is spawned as a
+background tokio task that drives the TCP protocol. If this task completes
+(due to server disconnect), subsequent client calls will fail.
+
+MYSQL
+-----
+mysql_async::Conn requires &mut self for all operations. Wrapped in
+Arc<Mutex<MysqlInner>>. Every operation locks the mutex.
+
+Connection pooling: MysqlDatabase uses OnceCell<mysql_async::Pool>. The pool
+is lazily initialized on first get_or_init_pool() call. All connections share
+the same pool.
+
+MysqlInner contains:
+  conn: mysql_async::Conn  -- pooled connection
+  autocommit: bool
+
+FLIGHTSQL
+---------
+FlightSqlServiceClient<Channel> is cloneable (gRPC channel is reference-counted).
+The connection stores one inside Mutex<FlightSqlInner>. Statements clone the
+client for independent use.
+
+FlightSqlInner contains:
+  client: FlightSqlServiceClient<Channel>
+  autocommit: bool
+  transaction_id: Option<bytes::Bytes>  -- server-assigned transaction ID
+
+When creating a statement, the client is cloned and transaction_id is copied.
+This means the statement's transaction_id is a snapshot; if the connection's
+transaction changes after statement creation, the statement still uses the old one.
+
+================================================================================
+2. STATEMENT STATE MACHINE
+================================================================================
+
+All drivers use a Mode enum to track statement state:
+
+  Idle ----set_sql_query()----> Sql(String)
+  Sql(String) ---prepare()----> Prepared(String)
+  Idle ----set_option(TargetTable)----> Ingest{table, mode}
+
+Valid transitions for execute():
+  Sql | Prepared -> runs query, returns RecordBatchReader
+  Idle -> InvalidState error
+  Ingest -> InvalidState error ("Use execute_update for ingest")
+
+Valid transitions for execute_update():
+  Sql | Prepared -> runs DML, returns affected row count
+  Ingest -> runs bulk ingest, returns inserted row count
+  Idle -> InvalidState error
+
+set_sql_query() always resets to Sql, regardless of current state.
+set_option(TargetTable) enters Ingest mode.
+set_option(IngestMode) only works if already in Ingest mode.
+
+Note: MySQL has no Prepared variant -- prepare() is a no-op.
+
+================================================================================
+3. BULK INGEST IMPLEMENTATION
+================================================================================
+
+SQLITE (convert.rs:ingest_batches)
+  1. DDL based on IngestMode (CREATE TABLE, DROP+CREATE, CREATE IF NOT EXISTS, or nothing)
+  2. Build INSERT statement: INSERT INTO "table" ("col1", "col2") VALUES (?1, ?2)
+  3. Check if autocommit is on (conn.is_autocommit())
+  4. If autocommit: wrap all inserts in our own BEGIN/COMMIT
+  5. For each batch, for each row: prepare statement, bind params, execute
+  6. On error: ROLLBACK our transaction (if we started one)
+
+  Type mapping (Arrow -> rusqlite::types::Value):
+    Boolean -> Integer(0/1), Int64 -> Integer, Float64 -> Real
+    Utf8 -> Text, Binary -> Blob, null -> Null
+
+POSTGRESQL (convert.rs:ingest_batches)
+  1. DDL based on IngestMode
+  2. Build COPY statement: COPY "table" ("col1", "col2") FROM STDIN (FORMAT text)
+  3. Always wraps in BEGIN/COMMIT (explicit transaction)
+  4. Uses tokio_postgres::CopyInSink for streaming
+  5. For each batch: build tab-separated text, send as Bytes chunk
+  6. Special characters escaped: \ -> \\, tab -> \t, newline -> \n, \r -> \r
+  7. NULL represented as \N
+  8. sink.close() finalizes the COPY
+
+  This is significantly faster than row-by-row INSERT for large datasets.
+
+MYSQL (convert.rs:ingest_batches)
+  1. DDL based on IngestMode
+  2. Build INSERT: INSERT INTO `table` (`col1`, `col2`) VALUES (?, ?)
+  3. Always wraps in BEGIN/COMMIT
+  4. For each batch, for each row: convert to Vec<mysql_async::Value>, exec_drop
+
+  Type mapping (Arrow -> mysql_async::Value):
+    Boolean -> Int(0/1), Int8..Int64 -> Int, UInt8..UInt64 -> UInt
+    Float32 -> Float, Float64 -> Double, Utf8 -> Bytes(utf8), null -> NULL
+
+FLIGHTSQL
+  Bulk ingest is not supported. Returns NotImplemented error.
+
+================================================================================
+4. QUERY RESULT MATERIALIZATION
+================================================================================
+
+SQLITE (convert.rs:SqliteReader)
+  All rows are materialized into memory before returning.
+
+  1. Prepare rusqlite statement
+  2. Bind params if provided
+  3. Iterate rows, collect into column-oriented Vec<Vec<rusqlite::types::Value>>
+  4. Infer schema by scanning each column for first non-NULL value
+  5. Build Arrow arrays using typed builders (Int64Builder, Float64Builder, StringBuilder)
+  6. Construct RecordBatch
+  7. Return SqliteReader (implements RecordBatchReader, yields the single batch)
+
+  Schema inference fallback: if all values are NULL, column type defaults to Utf8.
+
+POSTGRESQL (convert.rs:rows_to_batch)
+  All rows are materialized.
+
+  1. client.prepare() to get column metadata
+  2. Build Schema from column types (pg_type_to_arrow)
+  3. client.query() returns Vec<Row>
+  4. For each column: iterate rows, extract typed values, build Arrow arrays
+  5. RecordBatch from schema + arrays, wrapped in OneBatch
+
+MYSQL (convert.rs:rows_to_batch)
+  All rows are materialized.
+
+  1. conn.prep() to get column metadata
+  2. Build Schema from column types (mysql_type_to_arrow)
+  3. conn.exec() returns Vec<Row>
+  4. For each column: extract mysql_async::Value, convert to Arrow arrays
+  5. RecordBatch from schema + arrays, wrapped in OneBatch
+
+FLIGHTSQL (catalog.rs:collect_info)
+  Streams results from FlightSQL endpoints.
+
+  1. client.execute() returns FlightInfo with endpoints
+  2. For each endpoint: client.do_get(ticket) returns a stream
+  3. Each stream item is a RecordBatch (with unsafe pointer cast for version compat)
+  4. All batches collected into Vec<RecordBatch>, wrapped in VecReader
+
+================================================================================
+5. CATALOG METADATA CONSTRUCTION
+================================================================================
+
+The most complex part of each driver is building the nested Arrow arrays for
+get_objects(). The ADBC spec requires a deeply nested structure:
+
+  RecordBatch
+    catalog_name: Utf8 (nullable)
+    catalog_db_schemas: List<Struct>
+      db_schema_name: Utf8 (nullable)
+      db_schema_tables: List<Struct>
+        table_name: Utf8
+        table_type: Utf8
+        table_columns: List<Struct>    (19-field COLUMN_SCHEMA)
+        table_constraints: List<Struct> (4-field CONSTRAINT_SCHEMA)
+
+Each driver builds this bottom-up:
+  1. Fetch table list from system catalog
+  2. Optionally fetch columns per table
+  3. Build StructArray for tables (with column/constraint ListArrays)
+  4. Wrap in ListArray for schemas
+  5. Build StructArray for schemas
+  6. Wrap in ListArray for catalog level
+  7. Construct final RecordBatch
+
+Empty list arrays are constructed via helper functions (make_empty_col_list,
+make_empty_cons_list, etc.) which build properly-typed zero-length arrays.
+
+The SQLite driver fills actual column data (from PRAGMA table_info) when
+include_columns is true. PostgreSQL and MySQL currently leave columns/constraints
+empty (just proper empty arrays with correct offsets for each table).
+
+================================================================================
+6. CONNECTION STRING HANDLING
+================================================================================
+
+SQLITE
+  Simple: just the URI path or ":memory:"
+  Dispatches: ":memory:" -> open_in_memory(), else -> open(uri)
+
+POSTGRESQL
+  Accepts libpq-style connection strings:
+    "host=localhost port=5432 user=alice password=secret dbname=mydb"
+  Or postgres:// URLs (tokio_postgres parses both).
+
+  Username/Password DatabaseOptions are appended to conn_str with quoting:
+    " user='escaped_value'"
+  Escape function: \' and \\ (libpq quoting rules).
+
+MYSQL
+  Accepts MySQL URLs: "mysql://user:password@host:port/database"
+  Username/Password options override URL values via OptsBuilder.
+
+FLIGHTSQL
+  URI schemes:
+    grpc://host:port     -> http://host:port (plaintext)
+    grpc+tls://host:port -> https://host:port (TLS)
+
+  Uses Endpoint::connect_lazy() -- connection established on first RPC.
+  TLS requires "tls" feature flag on both adbc-flightsql and tonic.
