@@ -30,13 +30,34 @@ use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::Schema;
 
 use adbc::{
-    helpers::{require_string, OneBatch},
-    Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode, IngestMode,
-    IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementOption,
+    helpers::{require_string, set_statement_option, OneBatch},
+    Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode,
+    IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementMode, StatementOption,
 };
 
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
 use convert::{batch_row_to_params, SqliteReader};
+
+// ─────────────────────────────────────────────────────────────
+// with_conn — shared spawn_blocking helper
+// ─────────────────────────────────────────────────────────────
+
+/// Run a blocking closure on the shared connection via `spawn_blocking`.
+async fn with_conn<F, T>(inner: &Arc<Mutex<SqliteInner>>, f: F) -> Result<T>
+where
+    F: FnOnce(&mut SqliteInner) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let inner = Arc::clone(inner);
+    tokio::task::spawn_blocking(move || {
+        let mut state = inner
+            .lock()
+            .map_err(|e| Error::internal(format!("mutex poisoned: {e}")))?;
+        f(&mut state)
+    })
+    .await
+    .map_err(|e| Error::internal(e.to_string()))?
+}
 
 // ─────────────────────────────────────────────────────────────
 // SqliteDriver
@@ -126,7 +147,7 @@ struct SqliteInner {
 
 /// An open connection to a SQLite database.
 ///
-/// Wraps a [`rusqlite::Connection`] inside an `Arc<Mutex<…>>` so that
+/// Wraps a [`rusqlite::Connection`] inside an `Arc<Mutex<...>>` so that
 /// async methods can safely lock and use it from `spawn_blocking`.
 pub struct SqliteConnection {
     inner: Arc<Mutex<SqliteInner>>,
@@ -149,23 +170,6 @@ impl SqliteConnection {
             })),
         })
     }
-
-    /// Run a blocking closure on the shared connection via `spawn_blocking`.
-    async fn with_conn<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut SqliteInner) -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let mut state = inner
-                .lock()
-                .map_err(|e| Error::internal(format!("mutex poisoned: {e}")))?;
-            f(&mut state)
-        })
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?
-    }
 }
 
 impl Drop for SqliteConnection {
@@ -186,7 +190,7 @@ impl Connection for SqliteConnection {
     }
 
     async fn set_option(&self, opt: ConnectionOption) -> Result<()> {
-        self.with_conn(move |s| match opt {
+        with_conn(&self.inner, move |s| match opt {
             ConnectionOption::AutoCommit(enable) => {
                 if enable && !s.autocommit {
                     if s.in_transaction {
@@ -222,7 +226,7 @@ impl Connection for SqliteConnection {
     }
 
     async fn commit(&self) -> Result<()> {
-        self.with_conn(|s| {
+        with_conn(&self.inner, |s| {
             if s.autocommit {
                 return Err(Error::invalid_state(
                     "commit called while autocommit is enabled",
@@ -239,7 +243,7 @@ impl Connection for SqliteConnection {
     }
 
     async fn rollback(&self) -> Result<()> {
-        self.with_conn(|s| {
+        with_conn(&self.inner, |s| {
             if s.autocommit {
                 return Err(Error::invalid_state(
                     "rollback called while autocommit is enabled",
@@ -262,8 +266,7 @@ impl Connection for SqliteConnection {
         name: &str,
     ) -> Result<Schema> {
         let name = name.to_owned();
-        self.with_conn(move |s| get_table_schema_impl(&s.conn, &name))
-            .await
+        with_conn(&self.inner, move |s| get_table_schema_impl(&s.conn, &name)).await
     }
 
     async fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send>> {
@@ -295,7 +298,7 @@ impl Connection for SqliteConnection {
         let table_type: Option<Vec<String>> =
             table_type.map(|t| t.iter().map(|s| s.to_string()).collect());
         let column_name = column_name.map(|s| s.to_owned());
-        self.with_conn(move |s| {
+        with_conn(&self.inner, move |s| {
             let table_type_refs: Option<Vec<&str>> = table_type
                 .as_ref()
                 .map(|v| v.iter().map(|s| s.as_str()).collect());
@@ -318,22 +321,10 @@ impl Connection for SqliteConnection {
 // SqliteStatement
 // ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
-enum Mode {
-    #[default]
-    Idle,
-    Sql(String),
-    Prepared(String),
-    Ingest {
-        table: String,
-        mode: IngestMode,
-    },
-}
-
 /// A query or bulk-ingest statement on a [`SqliteConnection`].
 pub struct SqliteStatement {
     conn: Arc<Mutex<SqliteInner>>,
-    mode: Mode,
+    mode: StatementMode,
     bound_data: Option<Vec<RecordBatch>>,
 }
 
@@ -341,78 +332,67 @@ impl SqliteStatement {
     fn new(conn: Arc<Mutex<SqliteInner>>) -> Self {
         Self {
             conn,
-            mode: Mode::Idle,
+            mode: StatementMode::Idle,
             bound_data: None,
         }
-    }
-
-    /// Run a blocking closure on the shared connection via `spawn_blocking`.
-    async fn with_conn<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut SqliteInner) -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let inner = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
-            let mut state = inner
-                .lock()
-                .map_err(|e| Error::internal(format!("mutex poisoned: {e}")))?;
-            f(&mut state)
-        })
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?
     }
 }
 
 impl Statement for SqliteStatement {
     async fn set_sql_query(&mut self, sql: &str) -> Result<()> {
-        self.mode = Mode::Sql(sql.to_owned());
+        self.mode = StatementMode::Sql(sql.to_owned());
         Ok(())
     }
 
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
-            Mode::Sql(sql) => {
+            StatementMode::Sql(sql) => {
                 let sql = sql.clone();
-                let sql_for_closure = sql.clone();
-                self.with_conn(move |s| {
-                    s.conn
-                        .prepare(&sql_for_closure)
-                        .map_err(|e| Error::invalid_arg(e.to_string()))?;
-                    Ok(())
-                })
-                .await?;
-                self.mode = Mode::Prepared(sql);
+                {
+                    let sql = sql.clone();
+                    with_conn(&self.conn, move |s| {
+                        s.conn
+                            .prepare(&sql)
+                            .map_err(|e| Error::invalid_arg(e.to_string()))?;
+                        Ok(())
+                    })
+                    .await?;
+                }
+                self.mode = StatementMode::Prepared(sql);
                 Ok(())
             }
-            Mode::Prepared(_) => Ok(()),
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Cannot prepare an ingest statement")),
+            StatementMode::Prepared(_) => Ok(()),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Cannot prepare an ingest statement"))
+            }
         }
     }
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
-                self.with_conn(move |s| {
+                with_conn(&self.conn, move |s| {
                     let reader = SqliteReader::execute(&s.conn, &sql, params.as_deref())?;
                     Ok((Box::new(reader) as Box<dyn RecordBatchReader + Send>, None))
                 })
                 .await
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Use execute_update for ingest")),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Use execute_update for ingest"))
+            }
         }
     }
 
     async fn execute_update(&mut self) -> Result<i64> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
-                self.with_conn(move |s| match params {
+                with_conn(&self.conn, move |s| match params {
                     Some(p) => {
                         let param_refs: Vec<&dyn rusqlite::ToSql> =
                             p.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
@@ -432,17 +412,21 @@ impl Statement for SqliteStatement {
                 })
                 .await
             }
-            Mode::Ingest { table, mode } => {
+            StatementMode::Ingest { table, mode } => {
                 let table = table.clone();
                 let mode = *mode;
                 let batches = self.bound_data.take().unwrap_or_default();
                 if batches.is_empty() {
                     return Err(Error::invalid_state("No data bound for ingest"));
                 }
-                self.with_conn(move |s| convert::ingest_batches(&s.conn, &table, mode, &batches))
-                    .await
+                with_conn(&self.conn, move |s| {
+                    convert::ingest_batches(&s.conn, &table, mode, &batches)
+                })
+                .await
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL or ingest target has been set")),
+            StatementMode::Idle => {
+                Err(Error::invalid_state("No SQL or ingest target has been set"))
+            }
         }
     }
 
@@ -460,34 +444,7 @@ impl Statement for SqliteStatement {
     }
 
     async fn set_option(&mut self, opt: StatementOption) -> Result<()> {
-        match opt {
-            StatementOption::TargetTable(table) => {
-                let mode_val = if let Mode::Ingest { mode, .. } = &self.mode {
-                    *mode
-                } else {
-                    IngestMode::Create
-                };
-                self.mode = Mode::Ingest {
-                    table,
-                    mode: mode_val,
-                };
-                Ok(())
-            }
-            StatementOption::IngestMode(m) => {
-                if let Mode::Ingest { table, .. } = &self.mode {
-                    let table = table.clone();
-                    self.mode = Mode::Ingest { table, mode: m };
-                } else {
-                    return Err(Error::invalid_state(
-                        "IngestMode can only be set after TargetTable",
-                    ));
-                }
-                Ok(())
-            }
-            StatementOption::Other(key, _) => Err(Error::invalid_arg(format!(
-                "Unknown statement option: {key}"
-            ))),
-        }
+        set_statement_option(&mut self.mode, opt)
     }
 }
 

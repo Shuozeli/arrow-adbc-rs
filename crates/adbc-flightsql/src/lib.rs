@@ -33,9 +33,9 @@ use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 
 use adbc::{
-    helpers::{require_string, VecReader},
-    Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode, IngestMode,
-    ObjectDepth, OptionValue, Result, Statement, StatementOption, Status,
+    helpers::{require_string, set_statement_option, VecReader},
+    Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode, ObjectDepth,
+    OptionValue, Result, Statement, StatementMode, StatementOption, Status,
 };
 
 fn flight_err(e: impl std::fmt::Display) -> Error {
@@ -200,7 +200,7 @@ impl Connection for FlightSqlConnection {
         Ok(FlightSqlStatement {
             client: inner.client.clone(),
             transaction_id: inner.transaction_id.clone(),
-            mode: StmtMode::Idle,
+            mode: StatementMode::Idle,
             bound_data: None,
             prepared_stmt: None,
         })
@@ -333,23 +333,11 @@ impl Connection for FlightSqlConnection {
 // FlightSqlStatement
 // ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
-enum StmtMode {
-    #[default]
-    Idle,
-    Sql(String),
-    Prepared,
-    Ingest {
-        table: String,
-        mode: IngestMode,
-    },
-}
-
 /// A SQL statement or bulk-ingest operation on a [`FlightSqlConnection`].
 pub struct FlightSqlStatement {
     client: FlightSqlServiceClient<Channel>,
     transaction_id: Option<bytes::Bytes>,
-    mode: StmtMode,
+    mode: StatementMode,
     bound_data: Option<Vec<RecordBatch>>,
     /// Server-side prepared statement handle, set by [`Statement::prepare`].
     prepared_stmt: Option<PreparedStatement<Channel>>,
@@ -357,34 +345,34 @@ pub struct FlightSqlStatement {
 
 impl Statement for FlightSqlStatement {
     async fn set_sql_query(&mut self, sql: &str) -> Result<()> {
-        self.mode = StmtMode::Sql(sql.to_owned());
+        self.mode = StatementMode::Sql(sql.to_owned());
         Ok(())
     }
 
     async fn prepare(&mut self) -> Result<()> {
         let sql = match &self.mode {
-            StmtMode::Sql(s) => s.clone(),
-            StmtMode::Prepared => return Ok(()),
+            StatementMode::Sql(s) => s.clone(),
+            StatementMode::Prepared(_) => return Ok(()),
             _ => return Err(Error::invalid_state("No SQL has been set")),
         };
         let mut client = self.client.clone();
         let txn = self.transaction_id.clone();
         let handle = client.prepare(sql.clone(), txn).await.map_err(flight_err)?;
         self.prepared_stmt = Some(handle);
-        self.mode = StmtMode::Prepared;
+        self.mode = StatementMode::Prepared(sql);
         Ok(())
     }
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            StmtMode::Sql(sql) => {
+            StatementMode::Sql(sql) => {
                 let sql = sql.clone();
                 let txn = self.transaction_id.clone();
                 let mut client = self.client.clone();
                 let batches = catalog::execute_query(&mut client, &sql, txn).await?;
                 Ok((Box::new(VecReader::new(batches)), None))
             }
-            StmtMode::Prepared => {
+            StatementMode::Prepared(_) => {
                 let mut prepared = self.prepared_stmt.take().ok_or_else(|| {
                     Error::invalid_state("Prepared statement handle missing; call prepare() first")
                 })?;
@@ -395,24 +383,26 @@ impl Statement for FlightSqlStatement {
                 }
                 let info = prepared.execute().await.map_err(flight_err)?;
                 let mut client = self.client.clone();
-                let batches = catalog::collect_info_pub(&mut client, info).await?;
+                let batches = catalog::collect_info(&mut client, info).await?;
                 self.prepared_stmt = Some(prepared);
                 Ok((Box::new(VecReader::new(batches)), None))
             }
-            StmtMode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            StmtMode::Ingest { .. } => Err(Error::invalid_state("Use execute_update for ingest")),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Use execute_update for ingest"))
+            }
         }
     }
 
     async fn execute_update(&mut self) -> Result<i64> {
         match &self.mode {
-            StmtMode::Sql(sql) => {
+            StatementMode::Sql(sql) => {
                 let sql = sql.clone();
                 let txn = self.transaction_id.clone();
                 let mut client = self.client.clone();
                 catalog::execute_update(&mut client, &sql, txn).await
             }
-            StmtMode::Prepared => {
+            StatementMode::Prepared(_) => {
                 let mut prepared = self.prepared_stmt.take().ok_or_else(|| {
                     Error::invalid_state("Prepared statement handle missing; call prepare() first")
                 })?;
@@ -425,10 +415,10 @@ impl Statement for FlightSqlStatement {
                 self.prepared_stmt = Some(prepared);
                 Ok(count)
             }
-            StmtMode::Ingest { .. } => Err(Error::not_impl(
+            StatementMode::Ingest { .. } => Err(Error::not_impl(
                 "Bulk ingest is not supported by the FlightSQL driver",
             )),
-            StmtMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
         }
     }
 
@@ -446,30 +436,6 @@ impl Statement for FlightSqlStatement {
     }
 
     async fn set_option(&mut self, opt: StatementOption) -> Result<()> {
-        match opt {
-            StatementOption::TargetTable(table) => {
-                let m = if let StmtMode::Ingest { mode, .. } = &self.mode {
-                    *mode
-                } else {
-                    IngestMode::Create
-                };
-                self.mode = StmtMode::Ingest { table, mode: m };
-                Ok(())
-            }
-            StatementOption::IngestMode(m) => {
-                if let StmtMode::Ingest { table, .. } = &self.mode {
-                    let table = table.clone();
-                    self.mode = StmtMode::Ingest { table, mode: m };
-                } else {
-                    return Err(Error::invalid_state(
-                        "IngestMode can only be set after TargetTable",
-                    ));
-                }
-                Ok(())
-            }
-            StatementOption::Other(key, _) => Err(Error::invalid_arg(format!(
-                "Unknown statement option: {key}"
-            ))),
-        }
+        set_statement_option(&mut self.mode, opt)
     }
 }

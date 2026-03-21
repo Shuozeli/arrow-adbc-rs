@@ -111,6 +111,28 @@ pub enum IngestMode {
     CreateAppend,
 }
 
+/// The operational mode of a [`Statement`].
+///
+/// Tracks whether the statement has SQL set, is prepared, or is configured
+/// for bulk ingest. Shared across all driver implementations.
+#[derive(Debug, Default)]
+pub enum StatementMode {
+    /// No SQL or ingest target has been set.
+    #[default]
+    Idle,
+    /// SQL has been set but not prepared.
+    Sql(String),
+    /// SQL has been prepared on the server.
+    Prepared(String),
+    /// Bulk ingest mode.
+    Ingest {
+        /// Target table name.
+        table: String,
+        /// Ingest behavior.
+        mode: IngestMode,
+    },
+}
+
 /// Depth of catalog information to return from [`Connection::get_objects`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectDepth {

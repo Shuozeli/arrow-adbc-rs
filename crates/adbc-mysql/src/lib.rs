@@ -33,11 +33,11 @@ use arrow_schema::Schema;
 use mysql_async::prelude::Queryable;
 use tokio::sync::Mutex;
 
-use adbc::helpers::{require_string, OneBatch};
+use adbc::helpers::{require_string, set_statement_option, OneBatch};
 use adbc::sql::SqlLiteral;
 use adbc::{
     trusted_sql, Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode,
-    IngestMode, IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementOption,
+    IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementMode, StatementOption,
 };
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
 use convert::{mysql_columns_to_schema, rows_to_batch};
@@ -182,7 +182,7 @@ struct MysqlInner {
 
 /// A live MySQL connection.
 ///
-/// Wraps `mysql_async::Conn` in `Arc<Mutex<…>>` so `&self` methods can
+/// Wraps `mysql_async::Conn` in `Arc<Mutex<...>>` so `&self` methods can
 /// lock and use it asynchronously.
 pub struct MysqlConnection {
     inner: Arc<Mutex<MysqlInner>>,
@@ -347,22 +347,10 @@ impl Connection for MysqlConnection {
 // MysqlStatement
 // ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
-enum Mode {
-    #[default]
-    Idle,
-    Sql(String),
-    Prepared(String),
-    Ingest {
-        table: String,
-        mode: IngestMode,
-    },
-}
-
 /// A query or bulk-ingest statement on a [`MysqlConnection`].
 pub struct MysqlStatement {
     conn: Arc<Mutex<MysqlInner>>,
-    mode: Mode,
+    mode: StatementMode,
     bound_data: Option<Vec<RecordBatch>>,
 }
 
@@ -370,7 +358,7 @@ impl MysqlStatement {
     fn new(conn: Arc<Mutex<MysqlInner>>) -> Self {
         Self {
             conn,
-            mode: Mode::Idle,
+            mode: StatementMode::Idle,
             bound_data: None,
         }
     }
@@ -378,13 +366,13 @@ impl MysqlStatement {
 
 impl Statement for MysqlStatement {
     async fn set_sql_query(&mut self, sql: &str) -> Result<()> {
-        self.mode = Mode::Sql(sql.to_owned());
+        self.mode = StatementMode::Sql(sql.to_owned());
         Ok(())
     }
 
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
-            Mode::Sql(sql) => {
+            StatementMode::Sql(sql) => {
                 let sql = sql.clone();
                 let mut inner = self.conn.lock().await;
                 // Actually prepare on the server to validate SQL
@@ -394,18 +382,20 @@ impl Statement for MysqlStatement {
                     .await
                     .map_err(|e| Error::invalid_arg(e.to_string()))?;
                 drop(inner);
-                self.mode = Mode::Prepared(sql);
+                self.mode = StatementMode::Prepared(sql);
                 Ok(())
             }
-            Mode::Prepared(_) => Ok(()), // idempotent
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Cannot prepare an ingest statement")),
+            StatementMode::Prepared(_) => Ok(()), // idempotent
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Cannot prepare an ingest statement"))
+            }
         }
     }
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;
@@ -427,14 +417,16 @@ impl Statement for MysqlStatement {
                 let batch = rows_to_batch(rows, schema)?;
                 Ok((Box::new(OneBatch::new(batch)), None))
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Use execute_update for ingest")),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Use execute_update for ingest"))
+            }
         }
     }
 
     async fn execute_update(&mut self) -> Result<i64> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = convert::extract_bound_params(&self.bound_data);
                 let mut inner = self.conn.lock().await;
@@ -449,7 +441,7 @@ impl Statement for MysqlStatement {
                     .map_err(|e| Error::internal(e.to_string()))?;
                 Ok(inner.conn.affected_rows() as i64)
             }
-            Mode::Ingest { table, mode } => {
+            StatementMode::Ingest { table, mode } => {
                 let table = table.clone();
                 let mode = *mode;
                 let batches = self.bound_data.take().unwrap_or_default();
@@ -459,7 +451,9 @@ impl Statement for MysqlStatement {
                 let mut inner = self.conn.lock().await;
                 convert::ingest_batches(&mut inner.conn, &table, mode, &batches).await
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL or ingest target has been set")),
+            StatementMode::Idle => {
+                Err(Error::invalid_state("No SQL or ingest target has been set"))
+            }
         }
     }
 
@@ -477,30 +471,6 @@ impl Statement for MysqlStatement {
     }
 
     async fn set_option(&mut self, opt: StatementOption) -> Result<()> {
-        match opt {
-            StatementOption::TargetTable(table) => {
-                let m = if let Mode::Ingest { mode, .. } = &self.mode {
-                    *mode
-                } else {
-                    IngestMode::Create
-                };
-                self.mode = Mode::Ingest { table, mode: m };
-                Ok(())
-            }
-            StatementOption::IngestMode(m) => {
-                if let Mode::Ingest { table, .. } = &self.mode {
-                    let t = table.clone();
-                    self.mode = Mode::Ingest { table: t, mode: m };
-                } else {
-                    return Err(Error::invalid_state(
-                        "IngestMode can only be set after TargetTable",
-                    ));
-                }
-                Ok(())
-            }
-            StatementOption::Other(key, _) => Err(Error::invalid_arg(format!(
-                "Unknown statement option: {key}"
-            ))),
-        }
+        set_statement_option(&mut self.mode, opt)
     }
 }

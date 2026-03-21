@@ -6,15 +6,17 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch,
-    StringArray, StructArray, UInt32Array, UnionArray,
+    ArrayRef, BooleanArray, Int16Array, Int32Array, ListArray, RecordBatch, StringArray,
+    StructArray,
 };
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field};
 use rusqlite::Connection;
 
 use adbc::sql::QuotedIdent;
-use adbc::{schema as sch, trusted_sql, Error, InfoCode, ObjectDepth, Result};
+use adbc::{
+    helpers, schema as sch, trusted_sql, Error, InfoCode, ObjectDepth, Result, TableArrays,
+};
 
 // ─────────────────────────────────────────────────────────────
 // get_table_types
@@ -34,7 +36,7 @@ pub fn get_table_types_batch() -> Result<RecordBatch> {
 
 /// Static table of all supported info items:
 /// `(InfoCode, numeric_name, union_type_id, index_within_child)`
-const INFO_ITEMS: &[(InfoCode, u32, i8, usize)] = &[
+const INFO_ITEMS: &[helpers::InfoItem] = &[
     (InfoCode::VendorName, 0, 0, 0),
     (InfoCode::VendorVersion, 1, 0, 1),
     (InfoCode::VendorArrowVersion, 2, 0, 2),
@@ -46,165 +48,19 @@ const INFO_ITEMS: &[(InfoCode, u32, i8, usize)] = &[
     (InfoCode::DriverAdbcVersion, 103, 2, 0),
 ];
 
-/// Returns the string values for get_info, built at runtime because
-/// `rusqlite::version()` is not a const fn.
-fn string_vals() -> Vec<&'static str> {
-    vec![
+const BOOL_VALS: &[bool] = &[true, false]; // VendorSql, VendorSubstrait
+const INT_VALS: &[i64] = &[1_001_000]; // DriverAdbcVersion = ADBC 1.1.0
+
+pub fn get_info_batch(codes: Option<&[InfoCode]>) -> Result<RecordBatch> {
+    let sv = [
         "SQLite",                  // VendorName  (index 0)
         rusqlite::version(),       // VendorVersion (1)
         "",                        // VendorArrowVersion (2)
         "adbc-sqlite",             // DriverName (3)
         env!("CARGO_PKG_VERSION"), // DriverVersion (4)
         "",                        // DriverArrowVersion (5)
-    ]
-}
-const BOOL_VALS: &[bool] = &[true, false]; // VendorSql, VendorSubstrait
-const INT_VALS: &[i64] = &[1_001_000]; // DriverAdbcVersion = ADBC 1.1.0
-
-pub fn get_info_batch(codes: Option<&[InfoCode]>) -> Result<RecordBatch> {
-    // Filter by requested codes.
-    let items: Vec<_> = INFO_ITEMS
-        .iter()
-        .filter(|(code, ..)| codes.is_none_or(|cs| cs.contains(code)))
-        .collect();
-
-    // Build per-row arrays for name + union type/offset.
-    let mut names: Vec<u32> = Vec::new();
-    let mut type_ids: Vec<i8> = Vec::new();
-
-    let mut s_idx: i32 = 0;
-    let mut b_idx: i32 = 0;
-    let mut i_idx: i32 = 0;
-    let mut value_offsets: Vec<i32> = Vec::new();
-
-    for (_, name, tid, _) in &items {
-        names.push(*name);
-        type_ids.push(*tid);
-        let offset = match tid {
-            0 => {
-                let o = s_idx;
-                s_idx += 1;
-                o
-            }
-            1 => {
-                let o = b_idx;
-                b_idx += 1;
-                o
-            }
-            2 => {
-                let o = i_idx;
-                i_idx += 1;
-                o
-            }
-            _ => return Err(Error::internal(format!("unexpected union type_id: {tid}"))),
-        };
-        value_offsets.push(offset);
-    }
-
-    // Build child arrays (only include filtered items' values).
-    let sv = string_vals();
-    let string_child = Arc::new(StringArray::from(
-        items
-            .iter()
-            .filter(|(.., tid, _)| *tid == 0)
-            .map(|(.., idx)| sv[*idx])
-            .collect::<Vec<_>>(),
-    )) as Arc<dyn Array>;
-    let bool_child = Arc::new(BooleanArray::from(
-        items
-            .iter()
-            .filter(|(.., tid, _)| *tid == 1)
-            .map(|(.., idx)| BOOL_VALS[*idx])
-            .collect::<Vec<_>>(),
-    )) as Arc<dyn Array>;
-    let int_child = Arc::new(Int64Array::from(
-        items
-            .iter()
-            .filter(|(.., tid, _)| *tid == 2)
-            .map(|(.., idx)| INT_VALS[*idx])
-            .collect::<Vec<_>>(),
-    )) as Arc<dyn Array>;
-
-    // Empty children for union types we don't use.
-    let int32_child = Arc::new(Int32Array::from(Vec::<i32>::new())) as Arc<dyn Array>;
-    let str_list_child = Arc::new(make_empty_str_list()) as Arc<dyn Array>;
-    let map_child = Arc::new(make_empty_i32_map()?) as Arc<dyn Array>;
-
-    let union_fields = match sch::GET_INFO_SCHEMA.field(1).data_type() {
-        DataType::Union(uf, _) => uf.clone(),
-        dt => {
-            return Err(Error::internal(format!(
-                "expected Union type in GET_INFO_SCHEMA, got {dt:?}"
-            )))
-        }
-    };
-
-    let value_arr = UnionArray::try_new(
-        union_fields,
-        type_ids.into_iter().collect::<ScalarBuffer<i8>>(),
-        Some(value_offsets.into_iter().collect::<ScalarBuffer<i32>>()),
-        vec![
-            string_child,
-            bool_child,
-            int_child,
-            int32_child,
-            str_list_child,
-            map_child,
-        ],
-    )
-    .map_err(|e| Error::internal(e.to_string()))?;
-
-    RecordBatch::try_new(
-        sch::GET_INFO_SCHEMA.clone(),
-        vec![
-            Arc::new(UInt32Array::from(names)) as ArrayRef,
-            Arc::new(value_arr) as ArrayRef,
-        ],
-    )
-    .map_err(|e| Error::internal(e.to_string()))
-}
-
-fn make_empty_str_list() -> ListArray {
-    ListArray::new(
-        Arc::new(Field::new("item", DataType::Utf8, true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        Arc::new(StringArray::from(Vec::<&str>::new())),
-        None,
-    )
-}
-
-fn make_empty_i32_map() -> Result<arrow_array::MapArray> {
-    let key_field = Field::new("key", DataType::Int32, false);
-    let val_field = Field::new_list("value", Field::new_list_field(DataType::Int32, true), true);
-    let struct_arr = StructArray::new(
-        vec![key_field, val_field].into(),
-        vec![
-            Arc::new(Int32Array::from(Vec::<i32>::new())) as ArrayRef,
-            Arc::new(ListArray::new(
-                Arc::new(Field::new("item", DataType::Int32, true)),
-                OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-                Arc::new(Int32Array::from(Vec::<i32>::new())),
-                None,
-            )) as ArrayRef,
-        ],
-        None,
-    );
-    let entries_field = Field::new_struct(
-        "entries",
-        vec![
-            Field::new("key", DataType::Int32, false),
-            Field::new_list("value", Field::new_list_field(DataType::Int32, true), true),
-        ],
-        false,
-    );
-    arrow_array::MapArray::try_new(
-        Arc::new(entries_field),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        struct_arr,
-        None,
-        false,
-    )
-    .map_err(|e| Error::internal(e.to_string()))
+    ];
+    helpers::build_get_info_batch(INFO_ITEMS, &sv, BOOL_VALS, INT_VALS, codes)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -322,82 +178,9 @@ pub fn get_objects_batch(
     let (tname_arr, ttype_arr, tcols_arr, tcons_arr) =
         build_table_arrays(conn, &tables, include_tables, include_columns)?;
 
-    let num_tables = if include_tables { tname_arr.len() } else { 0 };
-    let table_struct = StructArray::from(vec![
-        (
-            Arc::new(Field::new("table_name", DataType::Utf8, false)),
-            tname_arr as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new("table_type", DataType::Utf8, false)),
-            ttype_arr as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new_list(
-                "table_columns",
-                Arc::new(Field::new("item", sch::COLUMN_SCHEMA.clone(), true)),
-                true,
-            )),
-            tcols_arr as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new_list(
-                "table_constraints",
-                Arc::new(Field::new("item", sch::CONSTRAINT_SCHEMA.clone(), true)),
-                true,
-            )),
-            tcons_arr as ArrayRef,
-        ),
-    ]);
-
-    let tables_list = ListArray::new(
-        Arc::new(Field::new("item", sch::TABLE_SCHEMA.clone(), true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32, num_tables as i32])),
-        Arc::new(table_struct),
-        None,
-    );
-
-    // ── db_schema struct ─────────────────────────────────────
-    let schema_struct = StructArray::from(vec![
-        (
-            Arc::new(Field::new("db_schema_name", DataType::Utf8, true)),
-            Arc::new(StringArray::from(vec![Some("main")])) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new_list(
-                "db_schema_tables",
-                Arc::new(Field::new("item", sch::TABLE_SCHEMA.clone(), true)),
-                true,
-            )),
-            Arc::new(tables_list) as ArrayRef,
-        ),
-    ]);
-
-    let n_schemas: i32 = if include_schemas { 1 } else { 0 };
-    let schemas_list = ListArray::new(
-        Arc::new(Field::new("item", sch::DB_SCHEMA_SCHEMA.clone(), true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32, n_schemas])),
-        Arc::new(schema_struct),
-        None,
-    );
-
-    // ── top-level batch ──────────────────────────────────────
-    RecordBatch::try_new(
-        sch::GET_OBJECTS_SCHEMA.clone(),
-        vec![
-            Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef, // catalog_name = NULL
-            Arc::new(schemas_list) as ArrayRef,
-        ],
-    )
-    .map_err(|e| Error::internal(e.to_string()))
+    let table_arrays = (tname_arr, ttype_arr, tcols_arr, tcons_arr);
+    helpers::build_get_objects_batch(table_arrays, "main", include_schemas, include_tables)
 }
-
-type TableArrays = (
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-    Arc<dyn Array>,
-);
 
 fn build_table_arrays(
     conn: &Connection,
@@ -409,8 +192,8 @@ fn build_table_arrays(
         return Ok((
             Arc::new(StringArray::from(Vec::<&str>::new())),
             Arc::new(StringArray::from(Vec::<&str>::new())),
-            Arc::new(make_empty_col_list()),
-            Arc::new(make_empty_cons_list()),
+            Arc::new(helpers::make_empty_col_list()),
+            Arc::new(helpers::make_empty_cons_list()),
         ));
     }
 
@@ -542,7 +325,7 @@ fn build_table_arrays(
     let cons_list = ListArray::new(
         Arc::new(Field::new("item", sch::CONSTRAINT_SCHEMA.clone(), true)),
         OffsetBuffer::new(ScalarBuffer::from(cons_offsets)),
-        Arc::new(make_empty_cons_struct()),
+        Arc::new(helpers::make_empty_cons_struct()),
         None,
     );
 
@@ -566,168 +349,4 @@ fn fetch_column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| Error::internal(e.to_string()))?;
     Ok(names)
-}
-
-fn make_empty_col_list() -> ListArray {
-    ListArray::new(
-        Arc::new(Field::new("item", sch::COLUMN_SCHEMA.clone(), true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        Arc::new(make_empty_col_struct()),
-        None,
-    )
-}
-
-fn make_empty_cons_list() -> ListArray {
-    ListArray::new(
-        Arc::new(Field::new("item", sch::CONSTRAINT_SCHEMA.clone(), true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        Arc::new(make_empty_cons_struct()),
-        None,
-    )
-}
-
-fn make_empty_col_struct() -> StructArray {
-    let ns = || -> ArrayRef { Arc::new(StringArray::from(Vec::<&str>::new())) };
-    let ni16 = || -> ArrayRef { Arc::new(Int16Array::from(Vec::<i16>::new())) };
-    let ni32 = || -> ArrayRef { Arc::new(Int32Array::from(Vec::<i32>::new())) };
-    let nbool = || -> ArrayRef { Arc::new(BooleanArray::from(Vec::<bool>::new())) };
-    StructArray::from(vec![
-        (
-            Arc::new(Field::new("column_name", DataType::Utf8, false)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("ordinal_position", DataType::Int32, true)),
-            ni32(),
-        ),
-        (Arc::new(Field::new("remarks", DataType::Utf8, true)), ns()),
-        (
-            Arc::new(Field::new("xdbc_data_type", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_type_name", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_column_size", DataType::Int32, true)),
-            ni32(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_decimal_digits", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_num_prec_radix", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_nullable", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_column_def", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_sql_data_type", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_datetime_sub", DataType::Int16, true)),
-            ni16(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_char_octet_length", DataType::Int32, true)),
-            ni32(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_is_nullable", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_scope_catalog", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_scope_schema", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_scope_table", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("xdbc_is_autoincrement", DataType::Boolean, true)),
-            nbool(),
-        ),
-        (
-            Arc::new(Field::new(
-                "xdbc_is_generatedcolumn",
-                DataType::Boolean,
-                true,
-            )),
-            nbool(),
-        ),
-    ])
-}
-
-fn make_empty_cons_struct() -> StructArray {
-    let ns = || -> ArrayRef { Arc::new(StringArray::from(Vec::<&str>::new())) };
-    let empty_str_list = ListArray::new(
-        Arc::new(Field::new("item", DataType::Utf8, false)), // non-null items, matching schema
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        Arc::new(StringArray::from(Vec::<&str>::new())),
-        None,
-    );
-    let usage_struct = StructArray::from(vec![
-        (
-            Arc::new(Field::new("fk_catalog", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("fk_db_schema", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("fk_table", DataType::Utf8, false)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("fk_column_name", DataType::Utf8, false)),
-            ns(),
-        ),
-    ]);
-    let usage_list = ListArray::new(
-        Arc::new(Field::new("item", sch::USAGE_SCHEMA.clone(), true)),
-        OffsetBuffer::new(ScalarBuffer::from(vec![0i32])),
-        Arc::new(usage_struct),
-        None,
-    );
-    StructArray::from(vec![
-        (
-            Arc::new(Field::new("constraint_name", DataType::Utf8, true)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new("constraint_type", DataType::Utf8, false)),
-            ns(),
-        ),
-        (
-            Arc::new(Field::new_list(
-                "constraint_column_names",
-                Field::new_list_field(DataType::Utf8, false),
-                false,
-            )),
-            Arc::new(empty_str_list) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new_list(
-                "constraint_column_usage",
-                Arc::new(Field::new("item", sch::USAGE_SCHEMA.clone(), true)),
-                true,
-            )),
-            Arc::new(usage_list) as ArrayRef,
-        ),
-    ])
 }

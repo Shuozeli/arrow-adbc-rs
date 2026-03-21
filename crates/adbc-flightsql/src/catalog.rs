@@ -33,7 +33,7 @@ fn assert_recordbatch_layout_compatible(flight_batch: &impl std::any::Any) {
 }
 
 /// Collect all record batches from a FlightInfo by fetching each endpoint.
-async fn collect_info(
+pub(crate) async fn collect_info(
     client: &mut FlightSqlServiceClient<Channel>,
     info: FlightInfo,
 ) -> Result<Vec<RecordBatch>> {
@@ -66,14 +66,6 @@ async fn collect_info(
         }
     }
     Ok(all)
-}
-
-/// Public(crate) wrapper around `collect_info` for use by `lib.rs`.
-pub(crate) async fn collect_info_pub(
-    client: &mut FlightSqlServiceClient<Channel>,
-    info: FlightInfo,
-) -> Result<Vec<RecordBatch>> {
-    collect_info(client, info).await
 }
 
 /// Bind a parameter `RecordBatch` to a prepared statement.

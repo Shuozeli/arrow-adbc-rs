@@ -27,9 +27,14 @@ pub mod sql;
 
 pub use driver::{
     Connection, ConnectionOption, Database, DatabaseOption, Driver, InfoCode, IngestMode,
-    IsolationLevel, ObjectDepth, OptionValue, Statement, StatementOption,
+    IsolationLevel, ObjectDepth, OptionValue, Statement, StatementMode, StatementOption,
 };
 pub use dyn_api::{DynConnection, DynStatement};
 pub use error::{Error, Result, Status};
-pub use helpers::{collect_reader, OneBatch, VecReader};
+pub use helpers::{
+    build_get_info_batch, build_get_objects_batch, build_table_arrays_simple, collect_reader,
+    make_empty_col_list, make_empty_col_list_for, make_empty_col_struct, make_empty_cons_list,
+    make_empty_cons_list_for, make_empty_cons_struct, make_empty_i32_map, make_empty_str_list,
+    set_statement_option, InfoItem, OneBatch, TableArrays, VecReader,
+};
 pub use sql::{QuotedIdent, SqlColumnDef, SqlJoined, SqlLiteral, SqlPlaceholders, TrustedSql};

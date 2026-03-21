@@ -32,11 +32,11 @@ use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::Schema;
 use tokio::sync::Mutex;
 
-use adbc::helpers::{require_string, OneBatch};
+use adbc::helpers::{require_string, set_statement_option, OneBatch};
 use adbc::sql::SqlLiteral;
 use adbc::{
     trusted_sql, Connection, ConnectionOption, Database, DatabaseOption, Driver, Error, InfoCode,
-    IngestMode, IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementOption,
+    IsolationLevel, ObjectDepth, OptionValue, Result, Statement, StatementMode, StatementOption,
 };
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
 use convert::{extract_bound_params, pg_columns_to_schema, rows_to_batch};
@@ -341,22 +341,10 @@ impl Connection for PostgresConnection {
 // PostgresStatement
 // ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
-enum Mode {
-    #[default]
-    Idle,
-    Sql(String),
-    Prepared(String),
-    Ingest {
-        table: String,
-        mode: IngestMode,
-    },
-}
-
 /// A query or bulk-ingest statement on a [`PostgresConnection`].
 pub struct PostgresStatement {
     client: Arc<tokio_postgres::Client>,
-    mode: Mode,
+    mode: StatementMode,
     bound_data: Option<Vec<RecordBatch>>,
 }
 
@@ -364,7 +352,7 @@ impl PostgresStatement {
     fn new(client: Arc<tokio_postgres::Client>) -> Self {
         Self {
             client,
-            mode: Mode::Idle,
+            mode: StatementMode::Idle,
             bound_data: None,
         }
     }
@@ -372,30 +360,32 @@ impl PostgresStatement {
 
 impl Statement for PostgresStatement {
     async fn set_sql_query(&mut self, sql: &str) -> Result<()> {
-        self.mode = Mode::Sql(sql.to_owned());
+        self.mode = StatementMode::Sql(sql.to_owned());
         Ok(())
     }
 
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
-            Mode::Sql(sql) => {
+            StatementMode::Sql(sql) => {
                 let sql = sql.clone();
                 self.client
                     .prepare(&sql)
                     .await
                     .map_err(|e| Error::invalid_arg(e.to_string()))?;
-                self.mode = Mode::Prepared(sql);
+                self.mode = StatementMode::Prepared(sql);
                 Ok(())
             }
-            Mode::Prepared(_) => Ok(()),
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Cannot prepare an ingest statement")),
+            StatementMode::Prepared(_) => Ok(()),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Cannot prepare an ingest statement"))
+            }
         }
     }
 
     async fn execute(&mut self) -> Result<(Box<dyn RecordBatchReader + Send>, Option<i64>)> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
                 let stmt = self
@@ -419,14 +409,16 @@ impl Statement for PostgresStatement {
                 let batch = rows_to_batch(&rows, schema)?;
                 Ok((Box::new(OneBatch::new(batch)), None))
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL has been set")),
-            Mode::Ingest { .. } => Err(Error::invalid_state("Use execute_update for ingest")),
+            StatementMode::Idle => Err(Error::invalid_state("No SQL has been set")),
+            StatementMode::Ingest { .. } => {
+                Err(Error::invalid_state("Use execute_update for ingest"))
+            }
         }
     }
 
     async fn execute_update(&mut self) -> Result<i64> {
         match &self.mode {
-            Mode::Sql(sql) | Mode::Prepared(sql) => {
+            StatementMode::Sql(sql) | StatementMode::Prepared(sql) => {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
                 let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = match &params {
@@ -443,7 +435,7 @@ impl Statement for PostgresStatement {
                     .map_err(|e| Error::internal(e.to_string()))?;
                 Ok(n as i64)
             }
-            Mode::Ingest { table, mode } => {
+            StatementMode::Ingest { table, mode } => {
                 let table = table.clone();
                 let mode = *mode;
                 let batches = self.bound_data.take().unwrap_or_default();
@@ -452,7 +444,9 @@ impl Statement for PostgresStatement {
                 }
                 convert::ingest_batches(&self.client, &table, mode, &batches).await
             }
-            Mode::Idle => Err(Error::invalid_state("No SQL or ingest target has been set")),
+            StatementMode::Idle => {
+                Err(Error::invalid_state("No SQL or ingest target has been set"))
+            }
         }
     }
 
@@ -470,34 +464,7 @@ impl Statement for PostgresStatement {
     }
 
     async fn set_option(&mut self, opt: StatementOption) -> Result<()> {
-        match opt {
-            StatementOption::TargetTable(table) => {
-                let mode_val = if let Mode::Ingest { mode, .. } = &self.mode {
-                    *mode
-                } else {
-                    IngestMode::Create
-                };
-                self.mode = Mode::Ingest {
-                    table,
-                    mode: mode_val,
-                };
-                Ok(())
-            }
-            StatementOption::IngestMode(m) => {
-                if let Mode::Ingest { table, .. } = &self.mode {
-                    let table = table.clone();
-                    self.mode = Mode::Ingest { table, mode: m };
-                } else {
-                    return Err(Error::invalid_state(
-                        "IngestMode can only be set after TargetTable",
-                    ));
-                }
-                Ok(())
-            }
-            StatementOption::Other(key, _) => Err(Error::invalid_arg(format!(
-                "Unknown statement option: {key}"
-            ))),
-        }
+        set_statement_option(&mut self.mode, opt)
     }
 }
 
