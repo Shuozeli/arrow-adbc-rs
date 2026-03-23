@@ -17,20 +17,6 @@ fn arrow_err(e: impl std::fmt::Display) -> Error {
     Error::new(e.to_string(), adbc::Status::Io)
 }
 
-/// Runtime guard for the unsafe RecordBatch pointer cast in `collect_info`.
-///
-/// `arrow_flight` re-exports `arrow_array::RecordBatch` from its own pinned
-/// version, which may differ from this crate's `arrow_array` version. The
-/// unsafe cast assumes identical memory layout. This function panics if
-/// size or alignment ever diverge.
-fn assert_recordbatch_layout_compatible(flight_batch: &impl std::any::Any) {
-    let flight_size = std::mem::size_of_val(flight_batch);
-    let expected_size = std::mem::size_of::<RecordBatch>();
-    assert_eq!(
-        flight_size, expected_size,
-        "RecordBatch size mismatch: arrow-flight={flight_size} vs arrow-array={expected_size}"
-    );
-}
 
 /// Collect all record batches from a FlightInfo by fetching each endpoint.
 pub(crate) async fn collect_info(
@@ -45,23 +31,7 @@ pub(crate) async fn collect_info(
             let mut stream = stream;
             while let Some(item) = stream.next().await {
                 let batch = item.map_err(arrow_err)?;
-                // SAFETY: The `batch` returned by `arrow_flight::FlightRecordBatchStream`
-                // is typed as `arrow_flight`'s re-exported `RecordBatch`. When
-                // `arrow-flight` and this crate depend on different semver-incompatible
-                // versions of `arrow-array`, the compiler treats them as distinct types
-                // even though their memory layout is identical (same struct, same fields).
-                // The pointer round-trip (`Box::into_raw` then `Box::from_raw`) reinterprets
-                // the allocation without copying, which is sound because:
-                //   1. Both types have identical size, alignment, and field layout.
-                //   2. The Box owns the heap allocation; no aliasing occurs.
-                //   3. We consume the original Box before creating the new one.
-                // If a future arrow version changes the RecordBatch layout, a compile-time
-                // size/align assertion (or a version-pinning CI check) should catch it.
-                assert_recordbatch_layout_compatible(&batch);
-                all.push(unsafe {
-                    let ptr = Box::into_raw(Box::new(batch));
-                    *Box::from_raw(ptr as *mut RecordBatch)
-                });
+                all.push(batch);
             }
         }
     }
@@ -69,26 +39,13 @@ pub(crate) async fn collect_info(
 }
 
 /// Bind a parameter `RecordBatch` to a prepared statement.
-///
-/// `PreparedStatement::set_parameters` expects the `arrow_array::RecordBatch`
-/// type from the version of `arrow-array` that `arrow-flight` was compiled
-/// against (55.x), while our crate uses 58.x. The two types have identical
-/// memory layout, so we reinterpret the pointer — the same technique used
-/// in `collect_info` for the reverse direction.
 pub(crate) fn set_prepared_parameters(
     prepared: &mut PreparedStatement<Channel>,
     batch: &RecordBatch,
 ) -> Result<()> {
-    // SAFETY: Our 58.x `RecordBatch` and arrow-flight's 55.x `RecordBatch`
-    // are the same struct with the same fields and alignment. The
-    // `Box::into_raw` / `Box::from_raw` round-trip reinterprets the heap
-    // allocation without copying. No aliasing occurs because the original
-    // `Box` is consumed before the new one is created.
-    let flight_batch = unsafe {
-        let ptr = Box::into_raw(Box::new(batch.clone())) as *mut ();
-        *Box::from_raw(ptr as *mut _)
-    };
-    prepared.set_parameters(flight_batch).map_err(arrow_err)
+    prepared
+        .set_parameters(batch.clone())
+        .map_err(arrow_err)
 }
 
 // ─────────────────────────────────────────────────────────────
