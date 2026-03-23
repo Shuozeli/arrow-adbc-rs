@@ -135,7 +135,6 @@ impl<D: Database + 'static> SessionManager<D> {
         self.sessions
             .retain(|_, session| session.millis_since_active() < timeout_ms);
     }
-
 }
 
 /// Generate a random 128-bit hex token.

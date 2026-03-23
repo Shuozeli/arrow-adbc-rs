@@ -17,7 +17,6 @@ fn arrow_err(e: impl std::fmt::Display) -> Error {
     Error::new(e.to_string(), adbc::Status::Io)
 }
 
-
 /// Collect all record batches from a FlightInfo by fetching each endpoint.
 pub(crate) async fn collect_info(
     client: &mut FlightSqlServiceClient<Channel>,
@@ -43,9 +42,7 @@ pub(crate) fn set_prepared_parameters(
     prepared: &mut PreparedStatement<Channel>,
     batch: &RecordBatch,
 ) -> Result<()> {
-    prepared
-        .set_parameters(batch.clone())
-        .map_err(arrow_err)
+    prepared.set_parameters(batch.clone()).map_err(arrow_err)
 }
 
 // ─────────────────────────────────────────────────────────────

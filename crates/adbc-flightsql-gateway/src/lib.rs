@@ -164,7 +164,9 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
         &self,
         request: Request<Streaming<HandshakeRequest>>,
     ) -> Result<
-        Response<Pin<Box<dyn futures_util::Stream<Item = Result<HandshakeResponse, Status>> + Send>>>,
+        Response<
+            Pin<Box<dyn futures_util::Stream<Item = Result<HandshakeResponse, Status>> + Send>>,
+        >,
         Status,
     > {
         // Parse Basic auth credentials from the request metadata.
@@ -180,13 +182,14 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
         while stream.next().await.is_some() {}
 
         // Build response with bearer token in metadata.
-        let response_stream: Pin<Box<dyn futures_util::Stream<Item = Result<HandshakeResponse, Status>> + Send>> =
-            Box::pin(stream::once(async {
-                Ok(HandshakeResponse {
-                    protocol_version: 0,
-                    payload: bytes::Bytes::new(),
-                })
-            }));
+        let response_stream: Pin<
+            Box<dyn futures_util::Stream<Item = Result<HandshakeResponse, Status>> + Send>,
+        > = Box::pin(stream::once(async {
+            Ok(HandshakeResponse {
+                protocol_version: 0,
+                payload: bytes::Bytes::new(),
+            })
+        }));
 
         let mut response = Response::new(response_stream);
         let bearer = format!("Bearer {token}")
@@ -221,10 +224,7 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
         let sql = String::from_utf8(ticket.statement_handle.to_vec())
             .map_err(|e| Status::invalid_argument(format!("invalid UTF-8 in handle: {e}")))?;
 
-        let resolved = self
-            .sessions
-            .resolve_connection(request.metadata())
-            .await?;
+        let resolved = self.sessions.resolve_connection(request.metadata()).await?;
         let conn = resolved.conn();
         let mut stmt = conn.new_statement().await.map_err(adbc_to_status)?;
         stmt.set_sql_query(&sql).await.map_err(adbc_to_status)?;
@@ -239,10 +239,7 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
         ticket: CommandStatementUpdate,
         request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        let resolved = self
-            .sessions
-            .resolve_connection(request.metadata())
-            .await?;
+        let resolved = self.sessions.resolve_connection(request.metadata()).await?;
         let conn = resolved.conn();
         let mut stmt = conn.new_statement().await.map_err(adbc_to_status)?;
         stmt.set_sql_query(&ticket.query)
@@ -269,10 +266,7 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
         _query: CommandGetTableTypes,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let resolved = self
-            .sessions
-            .resolve_connection(request.metadata())
-            .await?;
+        let resolved = self.sessions.resolve_connection(request.metadata()).await?;
         let conn = resolved.conn();
         let reader = conn.get_table_types().await.map_err(adbc_to_status)?;
         let data = reader_to_flight_data(reader)?;
@@ -307,10 +301,7 @@ impl<D: Database + 'static> FlightSqlService for FlightSqlGateway<D> {
                 Some(adbc_codes)
             }
         };
-        let resolved = self
-            .sessions
-            .resolve_connection(request.metadata())
-            .await?;
+        let resolved = self.sessions.resolve_connection(request.metadata()).await?;
         let conn = resolved.conn();
         let reader = conn
             .get_info(codes.as_deref())

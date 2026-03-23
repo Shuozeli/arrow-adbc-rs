@@ -20,9 +20,7 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 // Shared helpers
 // ─────────────────────────────────────────────────────────────
 
-async fn start_server<D: Database + 'static>(
-    db: D,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn start_server<D: Database + 'static>(db: D) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let gateway = FlightSqlGateway::new(db);
     let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -169,8 +167,19 @@ mod sqlite {
     async fn create_insert_select() {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
-        exec(&c, "CREATE TABLE t (id INTEGER NOT NULL, name TEXT NOT NULL)").await;
-        assert_eq!(exec(&c, "INSERT INTO t VALUES (1,'alpha'),(2,'beta'),(3,'gamma')").await, 3);
+        exec(
+            &c,
+            "CREATE TABLE t (id INTEGER NOT NULL, name TEXT NOT NULL)",
+        )
+        .await;
+        assert_eq!(
+            exec(
+                &c,
+                "INSERT INTO t VALUES (1,'alpha'),(2,'beta'),(3,'gamma')"
+            )
+            .await,
+            3
+        );
         let b = query(&c, "SELECT id, name FROM t ORDER BY id").await;
         assert_eq!(b.num_rows(), 3);
         let ids = b.column(0).as_primitive::<Int64Type>();
@@ -220,7 +229,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE null_t (id INTEGER, name TEXT)").await;
-        exec(&c, "INSERT INTO null_t VALUES (1,NULL),(NULL,'present'),(3,'also')").await;
+        exec(
+            &c,
+            "INSERT INTO null_t VALUES (1,NULL),(NULL,'present'),(3,'also')",
+        )
+        .await;
         let b = query(&c, "SELECT id, name FROM null_t ORDER BY rowid").await;
         assert_eq!(b.num_rows(), 3);
         let ids = b.column(0).as_primitive::<Int64Type>();
@@ -332,7 +345,11 @@ mod sqlite {
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE agg (val INTEGER)").await;
         exec(&c, "INSERT INTO agg VALUES (10),(20),(30),(40),(50)").await;
-        let b = query(&c, "SELECT COUNT(*) AS cnt, SUM(val), AVG(val), MIN(val), MAX(val) FROM agg").await;
+        let b = query(
+            &c,
+            "SELECT COUNT(*) AS cnt, SUM(val), AVG(val), MIN(val), MAX(val) FROM agg",
+        )
+        .await;
         assert_eq!(b.column(0).as_primitive::<Int64Type>().value(0), 5);
         assert_eq!(b.column(1).as_primitive::<Int64Type>().value(0), 150);
         assert!((b.column(2).as_primitive::<Float64Type>().value(0) - 30.0).abs() < f64::EPSILON);
@@ -348,8 +365,16 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE sales (product TEXT, amount INTEGER)").await;
-        exec(&c, "INSERT INTO sales VALUES ('A',10),('B',20),('A',30),('B',40),('A',50)").await;
-        let b = query(&c, "SELECT product, SUM(amount) AS total FROM sales GROUP BY product ORDER BY product").await;
+        exec(
+            &c,
+            "INSERT INTO sales VALUES ('A',10),('B',20),('A',30),('B',40),('A',50)",
+        )
+        .await;
+        let b = query(
+            &c,
+            "SELECT product, SUM(amount) AS total FROM sales GROUP BY product ORDER BY product",
+        )
+        .await;
         assert_eq!(b.num_rows(), 2);
         let products: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
         assert_eq!(products.value(0), "A");
@@ -364,7 +389,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE scores (team TEXT, score INTEGER)").await;
-        exec(&c, "INSERT INTO scores VALUES ('X',10),('Y',20),('X',30),('Y',5),('Z',100)").await;
+        exec(
+            &c,
+            "INSERT INTO scores VALUES ('X',10),('Y',20),('X',30),('Y',5),('Z',100)",
+        )
+        .await;
         let b = query(&c, "SELECT team, SUM(score) AS total FROM scores GROUP BY team HAVING total > 30 ORDER BY total DESC").await;
         assert_eq!(b.num_rows(), 2);
         let teams: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
@@ -399,7 +428,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE users (id INTEGER, name TEXT)").await;
-        exec(&c, "INSERT INTO users VALUES (1,'Alice'),(2,'Bob'),(3,'Charlie')").await;
+        exec(
+            &c,
+            "INSERT INTO users VALUES (1,'Alice'),(2,'Bob'),(3,'Charlie')",
+        )
+        .await;
         exec(&c, "CREATE TABLE orders (user_id INTEGER, amount INTEGER)").await;
         exec(&c, "INSERT INTO orders VALUES (1,100),(1,200),(2,300)").await;
         let b = query(&c, "SELECT u.name, SUM(o.amount) AS total FROM users u INNER JOIN orders o ON u.id=o.user_id GROUP BY u.name ORDER BY u.name").await;
@@ -417,7 +450,11 @@ mod sqlite {
         exec(&c, "CREATE TABLE dept (id INTEGER, name TEXT)").await;
         exec(&c, "INSERT INTO dept VALUES (1,'Eng'),(2,'Sales'),(3,'HR')").await;
         exec(&c, "CREATE TABLE emp (name TEXT, dept_id INTEGER)").await;
-        exec(&c, "INSERT INTO emp VALUES ('Alice',1),('Bob',1),('Carol',2)").await;
+        exec(
+            &c,
+            "INSERT INTO emp VALUES ('Alice',1),('Bob',1),('Carol',2)",
+        )
+        .await;
         let b = query(&c, "SELECT d.name AS dept, COUNT(e.name) AS cnt FROM dept d LEFT JOIN emp e ON d.id=e.dept_id GROUP BY d.name ORDER BY d.name").await;
         assert_eq!(b.num_rows(), 3);
         let counts = b.column(1).as_primitive::<Int64Type>();
@@ -433,15 +470,31 @@ mod sqlite {
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE mj_users (id INTEGER, name TEXT)").await;
         exec(&c, "INSERT INTO mj_users VALUES (1,'Alice'),(2,'Bob')").await;
-        exec(&c, "CREATE TABLE mj_orders (id INTEGER, user_id INTEGER, product_id INTEGER)").await;
-        exec(&c, "INSERT INTO mj_orders VALUES (1,1,10),(2,1,20),(3,2,10)").await;
-        exec(&c, "CREATE TABLE mj_products (id INTEGER, pname TEXT, price INTEGER)").await;
-        exec(&c, "INSERT INTO mj_products VALUES (10,'Widget',5),(20,'Gadget',15)").await;
+        exec(
+            &c,
+            "CREATE TABLE mj_orders (id INTEGER, user_id INTEGER, product_id INTEGER)",
+        )
+        .await;
+        exec(
+            &c,
+            "INSERT INTO mj_orders VALUES (1,1,10),(2,1,20),(3,2,10)",
+        )
+        .await;
+        exec(
+            &c,
+            "CREATE TABLE mj_products (id INTEGER, pname TEXT, price INTEGER)",
+        )
+        .await;
+        exec(
+            &c,
+            "INSERT INTO mj_products VALUES (10,'Widget',5),(20,'Gadget',15)",
+        )
+        .await;
         let b = query(&c, "SELECT u.name, SUM(p.price) AS total FROM mj_users u JOIN mj_orders o ON u.id=o.user_id JOIN mj_products p ON o.product_id=p.id GROUP BY u.name ORDER BY u.name").await;
         assert_eq!(b.num_rows(), 2);
         let totals = b.column(1).as_primitive::<Int64Type>();
         assert_eq!(totals.value(0), 20); // Alice: 5+15
-        assert_eq!(totals.value(1), 5);  // Bob: 5
+        assert_eq!(totals.value(1), 5); // Bob: 5
         h.abort();
     }
 
@@ -452,8 +505,16 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE items (id INTEGER, price REAL)").await;
-        exec(&c, "INSERT INTO items VALUES (1,10.0),(2,50.0),(3,30.0),(4,70.0)").await;
-        let b = query(&c, "SELECT id FROM items WHERE price > (SELECT AVG(price) FROM items) ORDER BY id").await;
+        exec(
+            &c,
+            "INSERT INTO items VALUES (1,10.0),(2,50.0),(3,30.0),(4,70.0)",
+        )
+        .await;
+        let b = query(
+            &c,
+            "SELECT id FROM items WHERE price > (SELECT AVG(price) FROM items) ORDER BY id",
+        )
+        .await;
         assert_eq!(b.num_rows(), 2);
         let ids = b.column(0).as_primitive::<Int64Type>();
         assert_eq!(ids.value(0), 2);
@@ -481,7 +542,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE grades (student TEXT, score INTEGER)").await;
-        exec(&c, "INSERT INTO grades VALUES ('Alice',95),('Bob',72),('Carol',45)").await;
+        exec(
+            &c,
+            "INSERT INTO grades VALUES ('Alice',95),('Bob',72),('Carol',45)",
+        )
+        .await;
         let b = query(&c, "SELECT student, CASE WHEN score>=90 THEN 'A' WHEN score>=70 THEN 'B' ELSE 'F' END AS grade FROM grades ORDER BY student").await;
         let grades: &StringArray = b.column(1).as_any().downcast_ref().unwrap();
         assert_eq!(grades.value(0), "A");
@@ -543,7 +608,11 @@ mod sqlite {
         assert_eq!(b.column(0).as_primitive::<Int64Type>().value(0), 2);
         assert_eq!(b.column(0).as_primitive::<Int64Type>().value(1), 4);
         // Subquery IN
-        let b2 = query(&c, "SELECT n FROM in_t WHERE n IN (SELECT n FROM in_t WHERE n > 3) ORDER BY n").await;
+        let b2 = query(
+            &c,
+            "SELECT n FROM in_t WHERE n IN (SELECT n FROM in_t WHERE n > 3) ORDER BY n",
+        )
+        .await;
         assert_eq!(b2.num_rows(), 2);
         h.abort();
     }
@@ -564,7 +633,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE lk (name TEXT)").await;
-        exec(&c, "INSERT INTO lk VALUES ('Alice'),('Bob'),('Anna'),('Carol')").await;
+        exec(
+            &c,
+            "INSERT INTO lk VALUES ('Alice'),('Bob'),('Anna'),('Carol')",
+        )
+        .await;
         let b = query(&c, "SELECT name FROM lk WHERE name LIKE 'A%' ORDER BY name").await;
         assert_eq!(b.num_rows(), 2);
         let names: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
@@ -627,7 +700,11 @@ mod sqlite {
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE wrn (name TEXT, score INTEGER)").await;
         exec(&c, "INSERT INTO wrn VALUES ('A',30),('B',10),('C',20)").await;
-        let b = query(&c, "SELECT name, ROW_NUMBER() OVER (ORDER BY score DESC) AS rn FROM wrn").await;
+        let b = query(
+            &c,
+            "SELECT name, ROW_NUMBER() OVER (ORDER BY score DESC) AS rn FROM wrn",
+        )
+        .await;
         assert_eq!(b.num_rows(), 3);
         let rn = b.column(1).as_primitive::<Int64Type>();
         // A=30 is rank 1, C=20 is rank 2, B=10 is rank 3
@@ -640,7 +717,11 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE wr (cat TEXT, val INTEGER)").await;
-        exec(&c, "INSERT INTO wr VALUES ('X',10),('X',20),('Y',30),('Y',5)").await;
+        exec(
+            &c,
+            "INSERT INTO wr VALUES ('X',10),('X',20),('Y',30),('Y',5)",
+        )
+        .await;
         let b = query(&c, "SELECT cat, val, RANK() OVER (PARTITION BY cat ORDER BY val DESC) AS rnk FROM wr ORDER BY cat, rnk").await;
         assert_eq!(b.num_rows(), 4);
         let rnk = b.column(2).as_primitive::<Int64Type>();
@@ -678,7 +759,9 @@ mod sqlite {
     async fn error_table_not_found() {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
-        assert!(try_query(&c, "SELECT * FROM no_such_table_xyz").await.is_err());
+        assert!(try_query(&c, "SELECT * FROM no_such_table_xyz")
+            .await
+            .is_err());
         h.abort();
     }
 
@@ -687,7 +770,9 @@ mod sqlite {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
         exec(&c, "CREATE TABLE ecol (x INTEGER)").await;
-        assert!(try_query(&c, "SELECT nonexistent_col FROM ecol").await.is_err());
+        assert!(try_query(&c, "SELECT nonexistent_col FROM ecol")
+            .await
+            .is_err());
         h.abort();
     }
 
@@ -723,7 +808,11 @@ mod sqlite {
     async fn max_integer_values() {
         let (addr, h) = gw().await;
         let c = connect_client(addr).await;
-        let b = query(&c, "SELECT 9223372036854775807 AS mx, -9223372036854775808 AS mn").await;
+        let b = query(
+            &c,
+            "SELECT 9223372036854775807 AS mx, -9223372036854775808 AS mn",
+        )
+        .await;
         let mx = b.column(0).as_primitive::<Int64Type>().value(0);
         let mn = b.column(1).as_primitive::<Int64Type>().value(0);
         assert_eq!(mx, i64::MAX);
@@ -811,7 +900,11 @@ mod postgres {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_int_f").await;
-        exec(&c, "CREATE TABLE gw_int_f (a SMALLINT, b INTEGER, c BIGINT)").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_int_f (a SMALLINT, b INTEGER, c BIGINT)",
+        )
+        .await;
         exec(&c, "INSERT INTO gw_int_f VALUES (1, 2, 3)").await;
         let b = query(&c, "SELECT a::BIGINT, b::BIGINT, c FROM gw_int_f").await;
         assert_eq!(b.num_rows(), 1);
@@ -838,7 +931,11 @@ mod postgres {
     async fn pg_types_text_family() {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
-        let b = query(&c, "SELECT 'hello'::TEXT AS t, 'world'::VARCHAR(50) AS v, 'pad'::CHAR(10) AS ch").await;
+        let b = query(
+            &c,
+            "SELECT 'hello'::TEXT AS t, 'world'::VARCHAR(50) AS v, 'pad'::CHAR(10) AS ch",
+        )
+        .await;
         let t: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
         assert_eq!(t.value(0), "hello");
         let v: &StringArray = b.column(1).as_any().downcast_ref().unwrap();
@@ -978,9 +1075,24 @@ mod postgres {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_pg_t").await;
-        exec(&c, "CREATE TABLE gw_pg_t (id BIGINT, name TEXT, score DOUBLE PRECISION)").await;
-        assert_eq!(exec(&c, "INSERT INTO gw_pg_t VALUES (1,'Alice',95.5),(2,'Bob',82.3),(3,'Carol',91.0)").await, 3);
-        let b = query(&c, "SELECT name, score FROM gw_pg_t WHERE score > 90 ORDER BY name").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_pg_t (id BIGINT, name TEXT, score DOUBLE PRECISION)",
+        )
+        .await;
+        assert_eq!(
+            exec(
+                &c,
+                "INSERT INTO gw_pg_t VALUES (1,'Alice',95.5),(2,'Bob',82.3),(3,'Carol',91.0)"
+            )
+            .await,
+            3
+        );
+        let b = query(
+            &c,
+            "SELECT name, score FROM gw_pg_t WHERE score > 90 ORDER BY name",
+        )
+        .await;
         assert_eq!(b.num_rows(), 2);
         let names: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
         assert_eq!(names.value(0), "Alice");
@@ -995,7 +1107,11 @@ mod postgres {
     async fn pg_cte() {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
-        let b = query(&c, "WITH nums AS (SELECT generate_series(1,5) AS n) SELECT SUM(n)::BIGINT FROM nums").await;
+        let b = query(
+            &c,
+            "WITH nums AS (SELECT generate_series(1,5) AS n) SELECT SUM(n)::BIGINT FROM nums",
+        )
+        .await;
         assert_eq!(b.column(0).as_primitive::<Int64Type>().value(0), 15);
         h.abort();
     }
@@ -1005,7 +1121,11 @@ mod postgres {
     async fn pg_union_all() {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
-        let b = query(&c, "SELECT 1::BIGINT AS n UNION ALL SELECT 2 UNION ALL SELECT 1").await;
+        let b = query(
+            &c,
+            "SELECT 1::BIGINT AS n UNION ALL SELECT 2 UNION ALL SELECT 1",
+        )
+        .await;
         assert_eq!(b.num_rows(), 3);
         h.abort();
     }
@@ -1111,7 +1231,11 @@ mod mysql {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_int").await;
-        exec(&c, "CREATE TABLE gw_m_int (a TINYINT, b SMALLINT, c INT, d BIGINT)").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_m_int (a TINYINT, b SMALLINT, c INT, d BIGINT)",
+        )
+        .await;
         exec(&c, "INSERT INTO gw_m_int VALUES (1,2,3,4)").await;
         let b = query(&c, "SELECT * FROM gw_m_int").await;
         assert_eq!(b.num_rows(), 1);
@@ -1126,8 +1250,16 @@ mod mysql {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_uint").await;
-        exec(&c, "CREATE TABLE gw_m_uint (a TINYINT UNSIGNED, b INT UNSIGNED, c BIGINT UNSIGNED)").await;
-        exec(&c, "INSERT INTO gw_m_uint VALUES (255, 4294967295, 9223372036854775807)").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_m_uint (a TINYINT UNSIGNED, b INT UNSIGNED, c BIGINT UNSIGNED)",
+        )
+        .await;
+        exec(
+            &c,
+            "INSERT INTO gw_m_uint VALUES (255, 4294967295, 9223372036854775807)",
+        )
+        .await;
         let b = query(&c, "SELECT * FROM gw_m_uint").await;
         assert_eq!(b.num_rows(), 1);
         assert_eq!(b.num_columns(), 3);
@@ -1140,7 +1272,11 @@ mod mysql {
     async fn mysql_types_float_family() {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
-        let b = query(&c, "SELECT CAST(1.5 AS FLOAT) AS f, CAST(2.5 AS DOUBLE) AS d").await;
+        let b = query(
+            &c,
+            "SELECT CAST(1.5 AS FLOAT) AS f, CAST(2.5 AS DOUBLE) AS d",
+        )
+        .await;
         assert!(!b.column(0).is_null(0));
         assert!(!b.column(1).is_null(0));
         h.abort();
@@ -1152,7 +1288,11 @@ mod mysql {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_txt").await;
-        exec(&c, "CREATE TABLE gw_m_txt (a VARCHAR(100), b TEXT, c CHAR(10))").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_m_txt (a VARCHAR(100), b TEXT, c CHAR(10))",
+        )
+        .await;
         exec(&c, "INSERT INTO gw_m_txt VALUES ('hello','world','pad')").await;
         let b = query(&c, "SELECT * FROM gw_m_txt").await;
         let a: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
@@ -1193,7 +1333,11 @@ mod mysql {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         // MySQL DATETIME/DATE are mapped to Utf8 by the driver.
-        let b = query(&c, "SELECT CAST('2026-03-22 10:30:00' AS CHAR) AS ts, CAST('2026-03-22' AS CHAR) AS d").await;
+        let b = query(
+            &c,
+            "SELECT CAST('2026-03-22 10:30:00' AS CHAR) AS ts, CAST('2026-03-22' AS CHAR) AS d",
+        )
+        .await;
         assert_eq!(b.num_rows(), 1);
         let ts: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
         assert!(ts.value(0).contains("2026-03-22"));
@@ -1231,9 +1375,17 @@ mod mysql {
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_grp").await;
         exec(&c, "CREATE TABLE gw_m_grp (cat VARCHAR(10), amt INT)").await;
-        exec(&c, "INSERT INTO gw_m_grp VALUES ('A',10),('B',20),('A',30),('B',40)").await;
+        exec(
+            &c,
+            "INSERT INTO gw_m_grp VALUES ('A',10),('B',20),('A',30),('B',40)",
+        )
+        .await;
         // MySQL SUM(INT) returns DECIMAL -> Float64. Use CAST to SIGNED for Int64.
-        let b = query(&c, "SELECT cat, CAST(SUM(amt) AS SIGNED) AS total FROM gw_m_grp GROUP BY cat ORDER BY cat").await;
+        let b = query(
+            &c,
+            "SELECT cat, CAST(SUM(amt) AS SIGNED) AS total FROM gw_m_grp GROUP BY cat ORDER BY cat",
+        )
+        .await;
         let totals = b.column(1).as_primitive::<Int64Type>();
         assert_eq!(totals.value(0), 40);
         assert_eq!(totals.value(1), 60);
@@ -1282,7 +1434,11 @@ mod mysql {
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_null").await;
         exec(&c, "CREATE TABLE gw_m_null (id INT, name VARCHAR(50))").await;
-        exec(&c, "INSERT INTO gw_m_null VALUES (1,NULL),(NULL,'present'),(3,'also')").await;
+        exec(
+            &c,
+            "INSERT INTO gw_m_null VALUES (1,NULL),(NULL,'present'),(3,'also')",
+        )
+        .await;
         let b = query(&c, "SELECT id, name FROM gw_m_null ORDER BY id IS NULL, id").await;
         assert_eq!(b.num_rows(), 3);
         assert!(b.column(0).is_null(2));
@@ -1298,9 +1454,24 @@ mod mysql {
         let (addr, h) = gw().await.unwrap();
         let c = connect_client(addr).await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_test").await;
-        exec(&c, "CREATE TABLE gw_m_test (id INT, name VARCHAR(100), score DOUBLE)").await;
-        assert_eq!(exec(&c, "INSERT INTO gw_m_test VALUES (1,'Alice',95.5),(2,'Bob',82.3),(3,'Carol',91.0)").await, 3);
-        let b = query(&c, "SELECT name FROM gw_m_test WHERE score > 90 ORDER BY name").await;
+        exec(
+            &c,
+            "CREATE TABLE gw_m_test (id INT, name VARCHAR(100), score DOUBLE)",
+        )
+        .await;
+        assert_eq!(
+            exec(
+                &c,
+                "INSERT INTO gw_m_test VALUES (1,'Alice',95.5),(2,'Bob',82.3),(3,'Carol',91.0)"
+            )
+            .await,
+            3
+        );
+        let b = query(
+            &c,
+            "SELECT name FROM gw_m_test WHERE score > 90 ORDER BY name",
+        )
+        .await;
         assert_eq!(b.num_rows(), 2);
         let names: &StringArray = b.column(0).as_any().downcast_ref().unwrap();
         assert_eq!(names.value(0), "Alice");
@@ -1343,9 +1514,18 @@ mod mysql {
         exec(&c, "CREATE TABLE gw_m_in_b (aid INT)").await;
         exec(&c, "INSERT INTO gw_m_in_b VALUES (2),(4)").await;
         // MySQL INT maps to Int32.
-        let b = query(&c, "SELECT id FROM gw_m_in_a WHERE id IN (SELECT aid FROM gw_m_in_b) ORDER BY id").await;
+        let b = query(
+            &c,
+            "SELECT id FROM gw_m_in_a WHERE id IN (SELECT aid FROM gw_m_in_b) ORDER BY id",
+        )
+        .await;
         assert_eq!(b.num_rows(), 2);
-        assert_eq!(b.column(0).as_primitive::<arrow_array::types::Int32Type>().value(0), 2);
+        assert_eq!(
+            b.column(0)
+                .as_primitive::<arrow_array::types::Int32Type>()
+                .value(0),
+            2
+        );
         exec(&c, "DROP TABLE IF EXISTS gw_m_in_b").await;
         exec(&c, "DROP TABLE IF EXISTS gw_m_in_a").await;
         h.abort();
@@ -1405,8 +1585,14 @@ mod auth {
         let db = drv
             .new_database_with_opts([
                 (DatabaseOption::Uri, OptionValue::String(uri)),
-                (DatabaseOption::Username, OptionValue::String(user.to_owned())),
-                (DatabaseOption::Password, OptionValue::String(pass.to_owned())),
+                (
+                    DatabaseOption::Username,
+                    OptionValue::String(user.to_owned()),
+                ),
+                (
+                    DatabaseOption::Password,
+                    OptionValue::String(pass.to_owned()),
+                ),
             ])
             .await
             .unwrap();

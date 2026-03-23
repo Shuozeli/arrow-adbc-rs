@@ -7,9 +7,7 @@
 
 use arrow_array::RecordBatch;
 use arrow_flight::FlightData;
-use arrow_ipc::writer::{
-    CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions,
-};
+use arrow_ipc::writer::{CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::Schema;
 
 /// Convert a schema and record batches into a sequence of [`FlightData`] messages.
