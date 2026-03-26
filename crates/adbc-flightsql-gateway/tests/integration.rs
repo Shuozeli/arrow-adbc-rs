@@ -48,7 +48,7 @@ async fn connect_client(
 }
 
 fn collect(reader: Box<dyn RecordBatchReader + Send>) -> RecordBatch {
-    adbc::collect_reader(reader)
+    adbc::collect_reader(reader).unwrap()
 }
 
 async fn query(

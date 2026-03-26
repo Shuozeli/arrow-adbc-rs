@@ -107,7 +107,10 @@ fn pg_type_str_to_arrow(s: &str) -> DataType {
         "integer" => DataType::Int32,
         "bigint" => DataType::Int64,
         "real" => DataType::Float32,
-        "double precision" | "numeric" | "decimal" => DataType::Float64,
+        "double precision" => DataType::Float64,
+        // Map numeric/decimal to Utf8 to match runtime conversion in convert.rs
+        // which preserves full precision by returning string representation.
+        "numeric" | "decimal" => DataType::Utf8,
         "bytea" => DataType::Binary,
         _ => DataType::Utf8,
     }

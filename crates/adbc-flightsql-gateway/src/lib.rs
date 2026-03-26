@@ -137,18 +137,7 @@ fn flight_data_to_stream(
 
 fn sql_info_to_adbc_codes(info: &[u32]) -> Vec<InfoCode> {
     info.iter()
-        .filter_map(|&code| match code {
-            0 => Some(InfoCode::VendorName),
-            1 => Some(InfoCode::VendorVersion),
-            2 => Some(InfoCode::VendorArrowVersion),
-            3 => Some(InfoCode::VendorSql),
-            4 => Some(InfoCode::VendorSubstrait),
-            100 => Some(InfoCode::DriverName),
-            101 => Some(InfoCode::DriverVersion),
-            102 => Some(InfoCode::DriverArrowVersion),
-            103 => Some(InfoCode::DriverAdbcVersion),
-            _ => None,
-        })
+        .filter_map(|&code| InfoCode::try_from(code).ok())
         .collect()
 }
 

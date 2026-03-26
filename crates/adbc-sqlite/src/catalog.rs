@@ -201,6 +201,8 @@ fn build_table_arrays(
     let mut ttypes: Vec<&str> = Vec::new();
     let mut col_offsets: Vec<i32> = vec![0];
     let mut cons_offsets: Vec<i32> = vec![0];
+    let mut col_offset: i32 = 0;
+    let cons_offset: i32 = 0;
 
     let mut all_col_names: Vec<String> = Vec::new();
     let mut all_col_pos: Vec<Option<i32>> = Vec::new();
@@ -216,11 +218,10 @@ fn build_table_arrays(
                 all_col_names.push(cname);
                 all_col_pos.push(Some(i as i32 + 1));
             }
-            col_offsets.push(col_offsets.last().unwrap() + n);
-        } else {
-            col_offsets.push(*col_offsets.last().unwrap());
+            col_offset += n;
         }
-        cons_offsets.push(*cons_offsets.last().unwrap());
+        col_offsets.push(col_offset);
+        cons_offsets.push(cons_offset);
     }
 
     // Build the flattened column struct array.

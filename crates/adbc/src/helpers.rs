@@ -97,11 +97,34 @@ impl arrow_array::RecordBatchReader for VecReader {
 /// Collect all batches from a [`RecordBatchReader`](arrow_array::RecordBatchReader) into a
 /// single [`RecordBatch`].
 ///
-/// Useful in tests and examples. Panics if any batch fails or concatenation fails.
-pub fn collect_reader(reader: Box<dyn arrow_array::RecordBatchReader + Send>) -> RecordBatch {
+/// Returns an error if any individual batch fails or if concatenation fails.
+pub fn collect_reader(reader: Box<dyn arrow_array::RecordBatchReader + Send>) -> Result<RecordBatch> {
     let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
-    arrow_select::concat::concat_batches(&schema, &batches).unwrap()
+    let batches: Vec<RecordBatch> = reader
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::io(e.to_string()))?;
+    arrow_select::concat::concat_batches(&schema, &batches)
+        .map_err(|e| Error::io(e.to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────
+// extract_first_row — shared bound-parameter extraction
+// ─────────────────────────────────────────────────────────────
+
+/// Extract parameters from the first row of the first bound batch using a
+/// driver-specific conversion function `f`.
+///
+/// Returns `None` when there are no batches, no rows, or the conversion fails.
+pub fn extract_first_row<T>(
+    bound_data: &Option<Vec<RecordBatch>>,
+    f: impl FnOnce(&RecordBatch, usize) -> Result<T>,
+) -> Option<T> {
+    let batches = bound_data.as_ref()?;
+    let batch = batches.first()?;
+    if batch.num_rows() == 0 {
+        return None;
+    }
+    f(batch, 0).ok()
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -1,124 +1,130 @@
-# Code Quality Audit Findings
+# Code Quality Findings
 
-## 1. Duplication (High Severity)
+## 1. Potential Bugs (High Severity)
 
-### 1.1 `with_conn` duplicated in SqliteConnection and SqliteStatement
-- **Files:** `crates/adbc-sqlite/src/lib.rs`
-- **Problem:** The `with_conn` method was identically copy-pasted in both `SqliteConnection` and `SqliteStatement`. Both clone an `Arc<Mutex<SqliteInner>>`, spawn_blocking, lock, and call a closure.
-- **Fix:** Extract a standalone `with_conn` function that takes `Arc<Mutex<SqliteInner>>` as a parameter.
-- **Status:** DONE
+### 1.1 Postgres `ingest_batches` unconditionally wraps in BEGIN/COMMIT -- breaks manual transactions
+- **Location:** `crates/adbc-postgres/src/convert.rs` (`ingest_batches`)
+- **Problem:** `ingest_batches` always executes `BEGIN` and `COMMIT`, even if the connection is already inside a manual transaction (autocommit=false). PostgreSQL treats `BEGIN` inside an existing transaction as a no-op (with a warning), but the `COMMIT` will commit the outer transaction prematurely.
+- **Fix:** Pass a boolean flag `needs_txn` to `ingest_batches` (or query the connection's autocommit state). Only issue `BEGIN`/`COMMIT` when the flag is true.
+- **Status: DONE.** Added `autocommit: bool` parameter to `ingest_batches`. Shared `PgState` via `Arc<Mutex<PgState>>` so the statement can read autocommit state. Transaction wrapping is now conditional, matching the SQLite driver pattern.
 
-### 1.2 `make_empty_col_struct` copy-pasted across 3 catalog modules
-- **Files:** `crates/adbc-sqlite/src/catalog.rs`, `crates/adbc-postgres/src/catalog.rs`, `crates/adbc-mysql/src/catalog.rs`
-- **Problem:** The 19-field column struct construction was identical in all three drivers. Same applies to `make_empty_cons_struct`, `make_empty_str_list`, `make_empty_i32_map`, `make_empty_col_list`, `make_empty_cons_list`.
-- **Fix:** Move these shared builders into the `adbc` core crate's `helpers` module.
-- **Status:** DONE
+### 1.2 MySQL `ingest_batches` has the same nested transaction bug
+- **Location:** `crates/adbc-mysql/src/convert.rs` (`ingest_batches`)
+- **Problem:** Same issue as 1.1 -- unconditionally calls `BEGIN`/`COMMIT` regardless of current transaction state.
+- **Fix:** Same approach as 1.1 -- check `autocommit` state before wrapping.
+- **Status: DONE.** Added `autocommit: bool` parameter to `ingest_batches`. Call site reads `inner.autocommit` and passes it. Transaction wrapping is now conditional.
 
-### 1.3 `get_info_batch` union construction duplicated across 3 catalog modules
-- **Files:** `crates/adbc-sqlite/src/catalog.rs`, `crates/adbc-postgres/src/catalog.rs`, `crates/adbc-mysql/src/catalog.rs`
-- **Problem:** The union array construction logic (extracting union_fields from GET_INFO_SCHEMA, building child arrays, constructing the UnionArray, assembling the RecordBatch) was nearly identical across all three. Only the data values differ.
-- **Fix:** Extract a shared `build_get_info_batch` function in `adbc::helpers` that takes string/bool/int values and an INFO_ITEMS table, and builds the batch.
-- **Status:** DONE
+### 1.3 Inconsistent NUMERIC type mapping in Postgres driver creates schema/data mismatch
+- **Location:** `crates/adbc-postgres/src/convert.rs:30` (`pg_type_to_arrow`)
+- **Also at:** `crates/adbc-postgres/src/catalog.rs` (`pg_type_str_to_arrow`)
+- **Problem:** In `convert.rs`, `PgType::NUMERIC` maps to `DataType::Utf8`. In `catalog.rs`, `"numeric"` and `"decimal"` map to `DataType::Float64`. Schema metadata and runtime data types were inconsistent.
+- **Fix:** Map `"numeric" | "decimal"` to `DataType::Utf8` in `catalog.rs` to match runtime conversion.
+- **Status: DONE.** `pg_type_str_to_arrow` now maps `"numeric" | "decimal"` to `Utf8`.
 
-### 1.4 `Mode` enum duplicated across 3 drivers
-- **Files:** `crates/adbc-sqlite/src/lib.rs`, `crates/adbc-postgres/src/lib.rs`, `crates/adbc-mysql/src/lib.rs`
-- **Problem:** Identical `Mode` enum (`Idle`, `Sql(String)`, `Prepared(String)`, `Ingest { table, mode }`) defined in each driver.
-- **Fix:** Move the `Mode` enum to the `adbc` core crate as `StatementMode`.
-- **Status:** DONE
+## 2. Unsafe Patterns (High Severity)
 
-### 1.5 `set_option` on Statement nearly identical across 3 drivers
-- **Files:** All three driver `lib.rs` files, in the `Statement::set_option` implementation.
-- **Problem:** The logic for `TargetTable` and `IngestMode` was identical in all 3 drivers.
-- **Fix:** Extract a `set_statement_option` helper in `adbc::helpers` that operates on the shared `StatementMode` type.
-- **Status:** DONE
+### 2.1 `collect_reader` uses `unwrap()` in public non-test code
+- **Location:** `crates/adbc/src/helpers.rs` (`collect_reader`)
+- **Problem:** `collect_reader` calls `.unwrap()` twice -- once on each batch and once on `concat_batches`. The function is `pub` and exported from the core `adbc` crate's top-level namespace.
+- **Fix:** Change the return type to `Result<RecordBatch>` and propagate errors with `?`. Update callers.
+- **Status: DONE.** `collect_reader` now returns `Result<RecordBatch>`. All 7 callers (tests, examples) updated to `.unwrap()` at the call site.
 
-### 1.6 `extract_bound_params` pattern duplicated across all 3 drivers
-- **Files:** `crates/adbc-sqlite/src/lib.rs`, `crates/adbc-postgres/src/convert.rs`, `crates/adbc-mysql/src/convert.rs`
-- **Problem:** Same pattern: get batches ref, get first, check num_rows, call batch_row_to_params. The inner batch_row_to_params differs per driver (different DB param types), but the outer shell is identical.
-- **Fix:** Not fixable without generics since inner types differ. Acceptable duplication.
-- **Status:** SKIPPED (acceptable -- different return types)
+### 2.2 TLS certificate loading silently ignores all failures
+- **Location:** `crates/adbc-postgres/src/lib.rs` (in `#[cfg(feature = "tls")]` connect)
+- **Problem:** `let _ = root_store.add(cert);` silently discards any certificate that fails to load. If the root store ends up empty, a confusing TLS error results.
+- **Fix:** After the loop, check `if root_store.is_empty()` and return a clear error.
+- **Status: DONE.** Added an `is_empty()` check after the cert loading loop that returns `Error::io("No valid TLS root certificates found in system store")`.
 
-### 1.7 `build_table_arrays` duplicated in Postgres/MySQL catalogs
-- **Files:** `crates/adbc-postgres/src/catalog.rs`, `crates/adbc-mysql/src/catalog.rs`
-- **Problem:** These were identical.
-- **Fix:** Consolidated via the shared `build_table_arrays_simple` helper in `adbc::helpers`.
-- **Status:** DONE
+## 3. Duplication (Medium Severity)
 
-### 1.8 `get_objects_batch` struct assembly duplicated across all 3 catalog modules
-- **Files:** `crates/adbc-sqlite/src/catalog.rs`, `crates/adbc-postgres/src/catalog.rs`, `crates/adbc-mysql/src/catalog.rs`
-- **Problem:** The table struct -> tables list -> schema struct -> schemas list -> final batch assembly (~50 lines) was copy-pasted in all three drivers with only the schema name value differing.
-- **Fix:** Extract `build_get_objects_batch` helper in `adbc::helpers` that takes table arrays, schema name, and flags.
-- **Status:** DONE
+### 3.1 `SqliteReader` reimplements `OneBatch`
+- **Location:** `crates/adbc-sqlite/src/convert.rs` (was `SqliteReader`)
+- **Also at:** `crates/adbc/src/helpers.rs` (`OneBatch`)
+- **Problem:** `SqliteReader` was structurally identical to `OneBatch`.
+- **Fix:** Changed `SqliteReader::execute` to a standalone `execute_query` function that returns `OneBatch` directly. Removed the duplicate `Iterator`/`RecordBatchReader` impls.
+- **Status: DONE.** Eliminated ~40 lines of duplicated code.
 
-## 2. Unnecessary Clone (Medium Severity)
+### 3.2 `extract_bound_params` duplicated across three drivers
+- **Location:** `crates/adbc-sqlite/src/lib.rs`, `crates/adbc-postgres/src/convert.rs`, `crates/adbc-mysql/src/convert.rs`
+- **Problem:** Identical control flow in all three drivers.
+- **Fix:** Extracted a generic `extract_first_row<T>` helper into `adbc::helpers`. All three drivers now delegate to it.
+- **Status: DONE.**
 
-### 2.1 Double clone in SQLite `prepare`
-- **File:** `crates/adbc-sqlite/src/lib.rs` lines 350-351
-- **Problem:** `let sql = sql.clone(); let validate_sql = sql.clone();` -- the first clone is from the match ref, and then it's immediately cloned again.
-- **Fix:** The two clones are structurally necessary (one for the `'static` closure sent to `spawn_blocking`, one for setting `StatementMode::Prepared(sql)` after the await). Renamed for clarity.
-- **Status:** DONE (clarified naming, two clones are required)
+### 3.3 `prepare()` match structure duplicated across all four drivers
+- **Location:** All four driver `lib.rs` files
+- **Problem:** Every driver's `prepare()` has the same 4-arm match. Only the validation call varies.
+- **Fix:** Extract a helper `fn prepare_mode(...)` into `adbc::helpers`.
+- **Status: SKIPPED.** The duplication is real but each driver's prepare logic has subtle differences (SQLite uses `with_conn` for thread safety, Postgres uses async client calls, FlightSQL is a no-op validation). Extracting a common helper would require an async closure or trait-based abstraction that adds more complexity than it removes. The 4-arm match is idiomatic and easy to understand in each driver.
 
-## 3. Dead Code / Indirection
+### 3.4 `new_connection_with_opts` boilerplate duplicated across all four Database impls
+- **Location:** All four driver `lib.rs` files
+- **Problem:** Identical pattern: `new_connection().await? -> for opt in opts { set_option(opt).await? }`.
+- **Fix:** Provide a default implementation in the `Database` trait.
+- **Status: SKIPPED.** This would require adding a `where Self::ConnectionType: Connection` bound and making `new_connection_with_opts` a provided method on the trait. While technically correct, it changes the trait's public API contract and the duplication is only ~10 lines per driver. Low ROI for the risk.
 
-### 3.1 `collect_info_pub` unnecessary wrapper in FlightSQL catalog
-- **File:** `crates/adbc-flightsql/src/catalog.rs`
-- **Problem:** `collect_info_pub` was a `pub(crate)` function that simply called `collect_info`. This added a layer of indirection with no value.
-- **Fix:** Made `collect_info` directly `pub(crate)` and removed the wrapper.
-- **Status:** DONE
+### 3.5 `get_table_types_batch` duplicated across three catalog modules
+- **Location:** `crates/adbc-sqlite/src/catalog.rs`, `crates/adbc-postgres/src/catalog.rs`, `crates/adbc-mysql/src/catalog.rs`
+- **Problem:** Structurally identical batch construction for table types.
+- **Fix:** Add `build_table_types_batch(types: &[&str])` to `adbc::helpers`.
+- **Status: SKIPPED.** Each implementation is only 5-7 lines and tightly coupled to driver-specific table type lists. Extracting a helper would save minimal code and add an indirection for a trivial operation.
 
-## 4. Noise / Excessive Dividers (Low Severity)
+### 3.6 Copy-pasted downcast pattern in Postgres `convert.rs`
+- **Location:** `crates/adbc-postgres/src/convert.rs` (`col_to_copy_text`, `batch_row_to_params`)
+- **Problem:** Repeated 4-line downcast pattern for every data type.
+- **Fix:** Add a `downcast_col` helper.
+- **Status: SKIPPED.** The Postgres downcast patterns are not identical across `col_to_copy_text` (returns formatted string) and `batch_row_to_params` (returns boxed trait object). A shared helper would need to be generic over the output transform, making it harder to read. The MySQL `downcast_col` helper works because MySQL only has one usage pattern.
 
-### 4.1 Heavy box-drawing section dividers throughout codebase
-- **Files:** All `.rs` files
-- **Problem:** Lines like `// ─────────────────────────────────────────────────────────────` appear repeatedly.
-- **Fix:** Leave as-is -- consistent across the project and part of established style.
-- **Status:** SKIPPED (project style)
+## 4. Inconsistency (Medium Severity)
 
-## 5. `#[allow(...)]` Suppression
+### 4.1 `arrow-buffer` version not using workspace dependency in `adbc-sqlite`
+- **Location:** `crates/adbc-sqlite/Cargo.toml`
+- **Problem:** Declares `arrow-buffer = { version = ">=53, <59" }` instead of `arrow-buffer.workspace = true`.
+- **Fix:** Changed to `arrow-buffer.workspace = true`.
+- **Status: DONE.**
 
-### 5.1 `#[allow(unused_mut)]` in FlightSQL
-- **File:** `crates/adbc-flightsql/src/lib.rs` line 124
-- **Problem:** `#[allow(unused_mut)]` on `endpoint` variable. The `mut` is only needed when the `tls` feature is enabled.
-- **Fix:** Leave as-is -- this is `unused_mut` (not clippy), and is a legitimate pattern for cfg-conditional code.
-- **Status:** SKIPPED (legitimate cfg pattern)
+### 4.2 `#[allow(unused_mut)]` in FlightSQL driver
+- **Location:** `crates/adbc-flightsql/src/lib.rs`
+- **Problem:** `#[allow(unused_mut)]` suppresses a warning that can be avoided by restructuring.
+- **Fix:** Restructured to use `let endpoint = ...;` followed by `#[cfg(feature = "tls")] let endpoint = if use_tls { ... } else { endpoint };`. No `mut` or `#[allow]` needed.
+- **Status: DONE.**
 
-## 6. Unsafe Code
+## 5. Missing Abstractions (Medium Severity)
 
-### 6.1 Unsafe pointer cast in FlightSQL catalog
-- **File:** `crates/adbc-flightsql/src/catalog.rs` lines 60-63, 95-98
-- **Problem:** Raw pointer casts between arrow-flight's RecordBatch and this crate's RecordBatch. Has a runtime layout assertion. Documented with SAFETY comments.
-- **Fix:** Leave as-is -- known workaround for semver-incompatible arrow crate versions. Well-documented and guarded.
-- **Status:** SKIPPED (documented, guarded)
+### 5.1 `sql_info_to_adbc_codes` manually maps u32 to InfoCode
+- **Location:** `crates/adbc-flightsql-gateway/src/lib.rs`
+- **Problem:** Manual match mapping u32 values to `InfoCode` variants, must be kept in sync.
+- **Fix:** Implemented `TryFrom<u32> for InfoCode` on the enum. Replaced the manual `filter_map` match with `.filter_map(|&code| InfoCode::try_from(code).ok())`.
+- **Status: DONE.**
 
-## 7. `unwrap()` in Non-Test Code
+### 5.2 No shared ingest DDL dispatch or transaction wrapper
+- **Location:** All three SQL driver `convert.rs` files
+- **Problem:** All three `ingest_batches` follow the same structure.
+- **Fix:** Extract DDL dispatch and transaction-wrapping into shared helpers.
+- **Status: SKIPPED.** The transaction-wrapping bug (1.1/1.2) has been fixed. The remaining structural similarity involves driver-specific SQL dialects (Postgres uses COPY, MySQL uses INSERT, SQLite uses synchronous rusqlite), making a shared abstraction awkward. The DDL generation is already driver-specific. Forcing a shared helper would require complex trait bounds or callbacks that hurt readability.
 
-### 7.1 `collect_reader` helper panics on error
-- **File:** `crates/adbc/src/helpers.rs` lines 103-104
-- **Problem:** Uses `.unwrap()` twice. However, the doc comment explicitly states "Panics if any batch fails or concatenation fails" and it is described as "useful in tests and examples."
-- **Fix:** Leave as-is -- this is a test/example utility with documented panic behavior.
-- **Status:** SKIPPED (documented test utility)
+## 6. Noise (Low Severity)
 
-### 7.2 `.last().unwrap()` in SQLite catalog `build_table_arrays`
-- **File:** `crates/adbc-sqlite/src/catalog.rs` lines 285, 287, 289
-- **Problem:** Uses `.last().unwrap()` on offset vectors. These vectors are initialized with `vec![0]` and only appended to, so `.last()` always returns `Some`.
-- **Fix:** Leave as-is -- the invariant (non-empty vec) is locally obvious and structurally guaranteed.
-- **Status:** SKIPPED (invariant guaranteed)
+### 6.1 Excessive section divider comments
+- **Location:** All source files
+- **Problem:** Box-drawing character horizontal rules appearing ~50 times across the codebase.
+- **Status: SKIPPED.** This is an established project style. Changing it would create unnecessary churn across every file with no functional benefit.
 
-## Summary
+## 7. Minor Issues (Low Severity)
 
-| Category | Found | Fixed | Skipped |
-|----------|-------|-------|---------|
-| Duplication | 8 | 7 | 1 |
-| Unnecessary Clone | 1 | 1 | 0 |
-| Dead Code / Indirection | 1 | 1 | 0 |
-| Noise | 1 | 0 | 1 |
-| `#[allow]` Suppression | 1 | 0 | 1 |
-| Unsafe Code | 1 | 0 | 1 |
-| `unwrap()` in non-test code | 2 | 0 | 2 |
-| **Total** | **15** | **9** | **6** |
+### 7.1 `SqliteStatement::prepare` clones SQL string twice
+- **Location:** `crates/adbc-sqlite/src/lib.rs`
+- **Problem:** Both clones used the same name `sql`, making intent unclear.
+- **Fix:** Renamed to `sql_owned` and `sql_for_validate`.
+- **Status: DONE.**
 
-### Net Impact
-- Removed ~130 lines of duplicated code across the three catalog modules
-- Added `build_get_objects_batch` helper to `adbc::helpers`, reducing each driver's catalog module by ~50 lines
-- Removed unnecessary `collect_info_pub` wrapper in FlightSQL
-- All changes verified with `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt`
+### 7.2 `unwrap()` on `.last()` in SQLite catalog offsets
+- **Location:** `crates/adbc-sqlite/src/catalog.rs`
+- **Problem:** `col_offsets.last().unwrap()` called in a loop.
+- **Fix:** Replaced with running counters `col_offset` and `cons_offset`.
+- **Status: DONE.**
+
+### 7.3 `unwrap()` in `schema.rs` LazyLock initializer
+- **Location:** `crates/adbc/src/schema.rs`
+- **Problem:** `UnionFields::try_new(...).unwrap()` in a static `LazyLock` with no explanation.
+- **Fix:** Added comment: `// Field IDs 0-5 are unique and match the 6 child fields; this cannot fail.`
+- **Status: DONE.**

@@ -255,6 +255,7 @@ pub async fn ingest_batches(
     table: &str,
     mode: IngestMode,
     batches: &[RecordBatch],
+    autocommit: bool,
 ) -> Result<i64> {
     if batches.is_empty() {
         return Ok(0);
@@ -310,21 +311,27 @@ pub async fn ingest_batches(
         placeholders,
     );
 
-    // Wrap all inserts in a transaction for atomicity.
-    conn.query_drop("BEGIN")
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?;
+    // Wrap all inserts in a transaction for atomicity when autocommit is on.
+    // When autocommit is off, the caller already has an active transaction.
+    let needs_txn = autocommit;
+    if needs_txn {
+        conn.query_drop("BEGIN")
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+    }
 
     let result = insert_rows(conn, insert_sql.as_str(), batches).await;
 
-    match &result {
-        Ok(_) => {
-            conn.query_drop("COMMIT")
-                .await
-                .map_err(|e| Error::internal(e.to_string()))?;
-        }
-        Err(_) => {
-            let _ = conn.query_drop("ROLLBACK").await;
+    if needs_txn {
+        match &result {
+            Ok(_) => {
+                conn.query_drop("COMMIT")
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = conn.query_drop("ROLLBACK").await;
+            }
         }
     }
 
@@ -406,12 +413,7 @@ pub fn batch_row_to_params(batch: &RecordBatch, row: usize) -> Result<Vec<Value>
 
 /// Extract bound parameters from the first row of the first bound batch.
 pub fn extract_bound_params(bound_data: &Option<Vec<RecordBatch>>) -> Option<Vec<Value>> {
-    let batches = bound_data.as_ref()?;
-    let batch = batches.first()?;
-    if batch.num_rows() == 0 {
-        return None;
-    }
-    batch_row_to_params(batch, 0).ok()
+    adbc::helpers::extract_first_row(bound_data, batch_row_to_params)
 }
 
 fn col_to_value(col: &dyn Array, row: usize) -> Result<Value> {

@@ -6,113 +6,91 @@ use arrow_array::{
     builder::{Float64Builder, Int64Builder, StringBuilder},
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, NullArray, RecordBatch, StringArray,
 };
-use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Schema};
 
 use rusqlite::Connection;
 
+use adbc::helpers::OneBatch;
 use adbc::sql::{QuotedIdent, SqlColumnDef, SqlJoined, SqlLiteral, SqlPlaceholders, TrustedSql};
 use adbc::{trusted_sql, Error, IngestMode, Result, Status};
 
 // ─────────────────────────────────────────────────────────────
-// SqliteReader — builds Arrow arrays directly from query results
+// execute_query — builds Arrow arrays directly from query results
 // ─────────────────────────────────────────────────────────────
 
-pub struct SqliteReader {
-    batch: Option<RecordBatch>,
-    schema: SchemaRef,
-}
+/// Execute `sql` and return a [`OneBatch`] reader containing all result rows.
+///
+/// Builds Arrow column arrays directly using builders, avoiding an
+/// intermediate `Vec<Vec<Value>>` allocation.
+///
+/// If `params` is provided, they are bound as positional parameters to the
+/// prepared statement.
+pub fn execute_query(
+    conn: &Connection,
+    sql: &str,
+    params: Option<&[rusqlite::types::Value]>,
+) -> Result<OneBatch> {
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| Error::new(e.to_string(), Status::InvalidArguments))?;
 
-impl SqliteReader {
-    /// Execute `sql` and return a [`SqliteReader`] containing all result rows.
-    ///
-    /// Builds Arrow column arrays directly using builders, avoiding an
-    /// intermediate `Vec<Vec<Value>>` allocation.
-    ///
-    /// If `params` is provided, they are bound as positional parameters to the
-    /// prepared statement.
-    pub fn execute(
-        conn: &Connection,
-        sql: &str,
-        params: Option<&[rusqlite::types::Value]>,
-    ) -> Result<Self> {
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| Error::new(e.to_string(), Status::InvalidArguments))?;
+    let col_count = stmt.column_count();
+    let col_names: Vec<String> = (0..col_count)
+        .map(|i| stmt.column_name(i).unwrap_or("").to_owned())
+        .collect();
 
-        let col_count = stmt.column_count();
-        let col_names: Vec<String> = (0..col_count)
-            .map(|i| stmt.column_name(i).unwrap_or("").to_owned())
-            .collect();
+    // Collect rows into column-oriented storage directly.
+    // Each column gets its own Vec of Values.
+    let mut columns: Vec<Vec<rusqlite::types::Value>> =
+        (0..col_count).map(|_| Vec::new()).collect();
 
-        // Collect rows into column-oriented storage directly.
-        // Each column gets its own Vec of Values.
-        let mut columns: Vec<Vec<rusqlite::types::Value>> =
-            (0..col_count).map(|_| Vec::new()).collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params
+        .map(|p| p.iter().map(|v| v as &dyn rusqlite::ToSql).collect())
+        .unwrap_or_default();
+    let mut row_iter = stmt
+        .query(param_refs.as_slice())
+        .map_err(|e| Error::internal(e.to_string()))?;
 
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params
-            .map(|p| p.iter().map(|v| v as &dyn rusqlite::ToSql).collect())
-            .unwrap_or_default();
-        let mut row_iter = stmt
-            .query(param_refs.as_slice())
-            .map_err(|e| Error::internal(e.to_string()))?;
-
-        while let Some(row) = row_iter
-            .next()
-            .map_err(|e| Error::internal(e.to_string()))?
-        {
-            for (i, col) in columns.iter_mut().enumerate() {
-                let val: rusqlite::types::Value =
-                    row.get(i).map_err(|e| Error::internal(e.to_string()))?;
-                col.push(val);
-            }
+    while let Some(row) = row_iter
+        .next()
+        .map_err(|e| Error::internal(e.to_string()))?
+    {
+        for (i, col) in columns.iter_mut().enumerate() {
+            let val: rusqlite::types::Value =
+                row.get(i).map_err(|e| Error::internal(e.to_string()))?;
+            col.push(val);
         }
+    }
 
-        let n_rows = if columns.is_empty() {
-            0
-        } else {
-            columns[0].len()
-        };
+    let n_rows = if columns.is_empty() {
+        0
+    } else {
+        columns[0].len()
+    };
 
-        // Infer schema by scanning each column for the first non-NULL value.
-        let fields: Vec<Field> = (0..col_count)
-            .map(|i| {
-                let dt = columns[i]
-                    .iter()
-                    .map(value_to_dt)
-                    .find(|dt| *dt != DataType::Null)
-                    .unwrap_or(DataType::Utf8);
-                Field::new(&col_names[i], dt, true)
-            })
-            .collect();
-
-        let schema = Arc::new(Schema::new(fields));
-
-        // Build Arrow arrays directly from column-oriented storage.
-        let arrays: Vec<ArrayRef> = (0..col_count)
-            .map(|ci| col_values_to_array(schema.field(ci).data_type(), &columns[ci], n_rows))
-            .collect();
-
-        let batch = RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| Error::internal(e.to_string()))?;
-
-        Ok(Self {
-            batch: Some(batch),
-            schema,
+    // Infer schema by scanning each column for the first non-NULL value.
+    let fields: Vec<Field> = (0..col_count)
+        .map(|i| {
+            let dt = columns[i]
+                .iter()
+                .map(value_to_dt)
+                .find(|dt| *dt != DataType::Null)
+                .unwrap_or(DataType::Utf8);
+            Field::new(&col_names[i], dt, true)
         })
-    }
-}
+        .collect();
 
-impl Iterator for SqliteReader {
-    type Item = std::result::Result<RecordBatch, ArrowError>;
-    fn next(&mut self) -> Option<Self::Item> {
-        Ok(self.batch.take()).transpose()
-    }
-}
+    let schema = Arc::new(Schema::new(fields));
 
-impl arrow_array::RecordBatchReader for SqliteReader {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
+    // Build Arrow arrays directly from column-oriented storage.
+    let arrays: Vec<ArrayRef> = (0..col_count)
+        .map(|ci| col_values_to_array(schema.field(ci).data_type(), &columns[ci], n_rows))
+        .collect();
+
+    let batch = RecordBatch::try_new(schema, arrays)
+        .map_err(|e| Error::internal(e.to_string()))?;
+
+    Ok(OneBatch::new(batch))
 }
 
 /// Build an Arrow array from a column of SQLite values using builders.

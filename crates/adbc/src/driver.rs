@@ -174,6 +174,25 @@ pub enum InfoCode {
     DriverAdbcVersion = 103,
 }
 
+impl TryFrom<u32> for InfoCode {
+    type Error = u32;
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::VendorName),
+            1 => Ok(Self::VendorVersion),
+            2 => Ok(Self::VendorArrowVersion),
+            3 => Ok(Self::VendorSql),
+            4 => Ok(Self::VendorSubstrait),
+            100 => Ok(Self::DriverName),
+            101 => Ok(Self::DriverVersion),
+            102 => Ok(Self::DriverArrowVersion),
+            103 => Ok(Self::DriverAdbcVersion),
+            other => Err(other),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Core traits
 // ─────────────────────────────────────────────────────────────

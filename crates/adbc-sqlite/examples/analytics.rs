@@ -154,5 +154,5 @@ async fn main() -> adbc::Result<()> {
 }
 
 fn collect(reader: Box<dyn RecordBatchReader + Send>) -> RecordBatch {
-    adbc::collect_reader(reader)
+    adbc::collect_reader(reader).unwrap()
 }

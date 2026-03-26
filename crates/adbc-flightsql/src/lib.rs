@@ -121,23 +121,23 @@ impl FlightSqlDatabase {
             self.uri.replacen("grpc://", "http://", 1)
         };
 
-        #[allow(unused_mut)]
-        let mut endpoint = Endpoint::from_shared(transport_uri)
+        let endpoint = Endpoint::from_shared(transport_uri)
             .map_err(|e| Error::invalid_arg(format!("Invalid URI '{}': {e}", self.uri)))?;
 
+        #[cfg(feature = "tls")]
+        let endpoint = if use_tls {
+            endpoint
+                .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
+                .map_err(|e| Error::io(format!("TLS configuration failed: {e}")))?
+        } else {
+            endpoint
+        };
+
+        #[cfg(not(feature = "tls"))]
         if use_tls {
-            #[cfg(feature = "tls")]
-            {
-                endpoint = endpoint
-                    .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
-                    .map_err(|e| Error::io(format!("TLS configuration failed: {e}")))?;
-            }
-            #[cfg(not(feature = "tls"))]
-            {
-                return Err(Error::invalid_arg(
-                    "grpc+tls:// requires the 'tls' feature to be enabled on adbc-flightsql",
-                ));
-            }
+            return Err(Error::invalid_arg(
+                "grpc+tls:// requires the 'tls' feature to be enabled on adbc-flightsql",
+            ));
         }
 
         let channel = endpoint.connect_lazy();

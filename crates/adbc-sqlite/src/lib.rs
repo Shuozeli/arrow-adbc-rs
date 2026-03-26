@@ -36,7 +36,7 @@ use adbc::{
 };
 
 use catalog::{get_info_batch, get_objects_batch, get_table_schema_impl, get_table_types_batch};
-use convert::{batch_row_to_params, SqliteReader};
+use convert::{batch_row_to_params, execute_query};
 
 // ─────────────────────────────────────────────────────────────
 // with_conn — shared spawn_blocking helper
@@ -347,18 +347,16 @@ impl Statement for SqliteStatement {
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
             StatementMode::Sql(sql) => {
-                let sql = sql.clone();
-                {
-                    let sql = sql.clone();
-                    with_conn(&self.conn, move |s| {
-                        s.conn
-                            .prepare(&sql)
-                            .map_err(|e| Error::invalid_arg(e.to_string()))?;
-                        Ok(())
-                    })
-                    .await?;
-                }
-                self.mode = StatementMode::Prepared(sql);
+                let sql_owned = sql.clone();
+                let sql_for_validate = sql_owned.clone();
+                with_conn(&self.conn, move |s| {
+                    s.conn
+                        .prepare(&sql_for_validate)
+                        .map_err(|e| Error::invalid_arg(e.to_string()))?;
+                    Ok(())
+                })
+                .await?;
+                self.mode = StatementMode::Prepared(sql_owned);
                 Ok(())
             }
             StatementMode::Prepared(_) => Ok(()),
@@ -375,7 +373,7 @@ impl Statement for SqliteStatement {
                 let sql = sql.clone();
                 let params = extract_bound_params(&self.bound_data);
                 with_conn(&self.conn, move |s| {
-                    let reader = SqliteReader::execute(&s.conn, &sql, params.as_deref())?;
+                    let reader = execute_query(&s.conn, &sql, params.as_deref())?;
                     Ok((Box::new(reader) as Box<dyn RecordBatchReader + Send>, None))
                 })
                 .await
@@ -454,10 +452,5 @@ impl Statement for SqliteStatement {
 fn extract_bound_params(
     bound_data: &Option<Vec<RecordBatch>>,
 ) -> Option<Vec<rusqlite::types::Value>> {
-    let batches = bound_data.as_ref()?;
-    let batch = batches.first()?;
-    if batch.num_rows() == 0 {
-        return None;
-    }
-    batch_row_to_params(batch, 0).ok()
+    adbc::helpers::extract_first_row(bound_data, batch_row_to_params)
 }

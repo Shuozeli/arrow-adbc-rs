@@ -46,6 +46,7 @@ pub static GET_INFO_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
             ),
         ],
     )
+    // Field IDs 0-5 are unique and match the 6 child fields; this cannot fail.
     .unwrap();
     Arc::new(Schema::new(vec![
         Field::new("info_name", DataType::UInt32, false),

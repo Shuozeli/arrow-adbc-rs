@@ -124,6 +124,7 @@ pub async fn ingest_batches(
     table: &str,
     mode: IngestMode,
     batches: &[RecordBatch],
+    autocommit: bool,
 ) -> Result<i64> {
     if batches.is_empty() {
         return Ok(0);
@@ -182,23 +183,29 @@ pub async fn ingest_batches(
     );
     let copy_sql = trusted_sql!("COPY {} ({}) FROM STDIN (FORMAT text)", quoted, col_names);
 
-    // Wrap in a transaction for atomicity.
-    client
-        .batch_execute("BEGIN")
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?;
+    // Wrap in a transaction for atomicity when autocommit is on.
+    // When autocommit is off, the caller already has an active transaction.
+    let needs_txn = autocommit;
+    if needs_txn {
+        client
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
+    }
 
     let result = copy_batches(client, copy_sql.as_str(), batches).await;
 
-    match &result {
-        Ok(_) => {
-            client
-                .batch_execute("COMMIT")
-                .await
-                .map_err(|e| Error::internal(e.to_string()))?;
-        }
-        Err(_) => {
-            let _ = client.batch_execute("ROLLBACK").await;
+    if needs_txn {
+        match &result {
+            Ok(_) => {
+                client
+                    .batch_execute("COMMIT")
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = client.batch_execute("ROLLBACK").await;
+            }
         }
     }
 
@@ -394,12 +401,7 @@ pub fn batch_row_to_params(
 pub fn extract_bound_params(
     bound_data: &Option<Vec<RecordBatch>>,
 ) -> Option<Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>> {
-    let batches = bound_data.as_ref()?;
-    let batch = batches.first()?;
-    if batch.num_rows() == 0 {
-        return None;
-    }
-    batch_row_to_params(batch, 0).ok()
+    adbc::helpers::extract_first_row(bound_data, batch_row_to_params)
 }
 
 // -----------------------------------------------------------------

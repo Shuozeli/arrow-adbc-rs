@@ -120,7 +120,14 @@ impl PostgresDatabase {
         let certs = rustls_native_certs::load_native_certs();
         let mut root_store = rustls::RootCertStore::empty();
         for cert in certs {
+            // Individual cert failures are non-fatal (some system certs may use
+            // unsupported algorithms), but we check below that at least one loaded.
             let _ = root_store.add(cert);
+        }
+        if root_store.is_empty() {
+            return Err(Error::io(
+                "No valid TLS root certificates found in system store".to_string(),
+            ));
         }
 
         let tls_config = rustls::ClientConfig::builder()
@@ -163,10 +170,10 @@ impl Database for PostgresDatabase {
         let client = self.connect().await?;
         Ok(PostgresConnection {
             client: Arc::new(client),
-            state: Mutex::new(PgState {
+            state: Arc::new(Mutex::new(PgState {
                 autocommit: true,
                 in_transaction: false,
-            }),
+            })),
         })
     }
 
@@ -192,6 +199,8 @@ struct PgState {
     in_transaction: bool,
 }
 
+type SharedPgState = Arc<Mutex<PgState>>;
+
 /// A live connection to a PostgreSQL server.
 ///
 /// The underlying [`tokio_postgres::Client`] handles pipelining internally,
@@ -199,7 +208,7 @@ struct PgState {
 /// the transaction state.
 pub struct PostgresConnection {
     client: Arc<tokio_postgres::Client>,
-    state: Mutex<PgState>,
+    state: SharedPgState,
 }
 
 impl PostgresConnection {
@@ -215,7 +224,10 @@ impl Connection for PostgresConnection {
     type StatementType = PostgresStatement;
 
     async fn new_statement(&self) -> Result<PostgresStatement> {
-        Ok(PostgresStatement::new(Arc::clone(&self.client)))
+        Ok(PostgresStatement::new(
+            Arc::clone(&self.client),
+            Arc::clone(&self.state),
+        ))
     }
 
     async fn set_option(&self, opt: ConnectionOption) -> Result<()> {
@@ -344,14 +356,16 @@ impl Connection for PostgresConnection {
 /// A query or bulk-ingest statement on a [`PostgresConnection`].
 pub struct PostgresStatement {
     client: Arc<tokio_postgres::Client>,
+    state: SharedPgState,
     mode: StatementMode,
     bound_data: Option<Vec<RecordBatch>>,
 }
 
 impl PostgresStatement {
-    fn new(client: Arc<tokio_postgres::Client>) -> Self {
+    fn new(client: Arc<tokio_postgres::Client>, state: SharedPgState) -> Self {
         Self {
             client,
+            state,
             mode: StatementMode::Idle,
             bound_data: None,
         }
@@ -442,7 +456,8 @@ impl Statement for PostgresStatement {
                 if batches.is_empty() {
                     return Err(Error::invalid_state("No data bound for ingest"));
                 }
-                convert::ingest_batches(&self.client, &table, mode, &batches).await
+                let autocommit = self.state.lock().await.autocommit;
+                convert::ingest_batches(&self.client, &table, mode, &batches, autocommit).await
             }
             StatementMode::Idle => {
                 Err(Error::invalid_state("No SQL or ingest target has been set"))

@@ -449,7 +449,8 @@ impl Statement for MysqlStatement {
                     return Err(Error::invalid_state("No data bound for ingest"));
                 }
                 let mut inner = self.conn.lock().await;
-                convert::ingest_batches(&mut inner.conn, &table, mode, &batches).await
+                let autocommit = inner.autocommit;
+                convert::ingest_batches(&mut inner.conn, &table, mode, &batches, autocommit).await
             }
             StatementMode::Idle => {
                 Err(Error::invalid_state("No SQL or ingest target has been set"))
