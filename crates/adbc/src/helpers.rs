@@ -98,13 +98,14 @@ impl arrow_array::RecordBatchReader for VecReader {
 /// single [`RecordBatch`].
 ///
 /// Returns an error if any individual batch fails or if concatenation fails.
-pub fn collect_reader(reader: Box<dyn arrow_array::RecordBatchReader + Send>) -> Result<RecordBatch> {
+pub fn collect_reader(
+    reader: Box<dyn arrow_array::RecordBatchReader + Send>,
+) -> Result<RecordBatch> {
     let schema = reader.schema();
     let batches: Vec<RecordBatch> = reader
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::io(e.to_string()))?;
-    arrow_select::concat::concat_batches(&schema, &batches)
-        .map_err(|e| Error::io(e.to_string()))
+    arrow_select::concat::concat_batches(&schema, &batches).map_err(|e| Error::io(e.to_string()))
 }
 
 // ─────────────────────────────────────────────────────────────

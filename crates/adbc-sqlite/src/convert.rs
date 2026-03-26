@@ -87,8 +87,7 @@ pub fn execute_query(
         .map(|ci| col_values_to_array(schema.field(ci).data_type(), &columns[ci], n_rows))
         .collect();
 
-    let batch = RecordBatch::try_new(schema, arrays)
-        .map_err(|e| Error::internal(e.to_string()))?;
+    let batch = RecordBatch::try_new(schema, arrays).map_err(|e| Error::internal(e.to_string()))?;
 
     Ok(OneBatch::new(batch))
 }
