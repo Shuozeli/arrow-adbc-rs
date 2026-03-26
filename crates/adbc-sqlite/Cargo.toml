@@ -16,7 +16,6 @@ adbc.workspace = true
 arrow-array.workspace = true
 arrow-buffer.workspace = true
 arrow-schema.workspace = true
-arrow-select.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
 

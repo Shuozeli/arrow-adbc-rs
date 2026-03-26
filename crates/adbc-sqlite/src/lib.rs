@@ -347,8 +347,8 @@ impl Statement for SqliteStatement {
     async fn prepare(&mut self) -> Result<()> {
         match &self.mode {
             StatementMode::Sql(sql) => {
-                let sql_owned = sql.clone();
-                let sql_for_validate = sql_owned.clone();
+                let sql = sql.clone();
+                let sql_for_validate = sql.clone();
                 with_conn(&self.conn, move |s| {
                     s.conn
                         .prepare(&sql_for_validate)
@@ -356,7 +356,7 @@ impl Statement for SqliteStatement {
                     Ok(())
                 })
                 .await?;
-                self.mode = StatementMode::Prepared(sql_owned);
+                self.mode = StatementMode::Prepared(sql);
                 Ok(())
             }
             StatementMode::Prepared(_) => Ok(()),

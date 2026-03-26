@@ -18,9 +18,7 @@ tls = ["dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs"]
 [dependencies]
 adbc.workspace = true
 arrow-array.workspace = true
-arrow-buffer.workspace = true
 arrow-schema.workspace = true
-arrow-select.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 rustls = { workspace = true, optional = true }
