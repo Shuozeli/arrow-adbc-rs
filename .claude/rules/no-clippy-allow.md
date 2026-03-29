@@ -1,1 +1,0 @@
-Never use `#[allow(clippy::...)]` to suppress clippy warnings in order to pass pre-commit hooks. Fix the actual code issue that clippy is flagging (e.g., extract type aliases for complex types, restructure code to avoid the warning).
